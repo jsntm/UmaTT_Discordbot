@@ -3,6 +3,8 @@ Umamusume team trials discord bot with OCR and data analysis
 
 ## Bot Host Usage (Windows)
 
+```pip install -r requirements.txt```
+
 Place your bot token inside umaTTauth.txt.
 
 For best OCR accuracy, set an OpenAI API key before starting the bot:
