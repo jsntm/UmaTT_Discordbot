@@ -26,6 +26,17 @@ Optional environment variables:
 
 ## User Usage
 
+<table>
+  <tr>
+    <td align="center"><b>TOP</b></td>
+    <td align="center"><b>BOTTOM</b></td>
+  </tr>
+  <tr>
+    <td><img src="https://i.imgur.com/5YYHwwn.png" width="200"></td>
+    <td><img src="https://i.imgur.com/YTWa7OR.png" width="200"></td>
+  </tr>
+</table>
+
 1. use `/team-replace` to fill out your team. Upon creation, each uma gets a 5 digit alphanumeric `uma_id`.
 2. use `/change-ocr` to verify OCR works on top and bottom screenshots
 3. use `/ocr` and attach top and bottom image. Multiple commands may be run at the same time with no issue.
