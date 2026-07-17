@@ -39,7 +39,8 @@ Optional environment variables:
 
 1. use `/team-replace` to fill out your team. Upon creation, each uma gets a 5 digit alphanumeric `uma_id`.
 2. use `/change-ocr` to verify OCR works on top and bottom screenshots
-3. use `/ocr` and attach top and bottom image. Multiple commands may be run at the same time with no issue.
+3. use `/ocr` and attach up to 10 images. Multiple commands may be run at the same time with no issue.
+3.5. use `/ocr2`, `/ocr3`, `/ocr4`, or `/ocr5` when uploading an exact number of trials. Every top/bottom attachment on these commands is mandatory, so Discord advances directly through the attachment fields while selecting images.
 
 Use these slash commands to repair OCR mistakes:
 
@@ -50,6 +51,7 @@ Use these slash commands to repair OCR mistakes:
 Use these slash commands for data analysis:
 - `/summary`: summarizes statistics for current team
 - `/box-and-whisker`: self-explanatory
+- `/box-and-whisker-custom`: compares comma-separated uma IDs, `current`, or `all`. Add optional track, `ace`/`nonace`, and running-style specifiers with spaces or dashes, for example `ab3de-front-nonace, current-dirt`. Set `merge-same-uma` to combine every matching configuration for each selector.
 
 Use these slash commands for data export:
 - `/get-current-team`
