@@ -66,11 +66,15 @@ class OCRService:
         screenshot_type: ScreenshotType,
         work_dir: Path,
         *,
-        update_coords: tuple[tuple[int, int], tuple[int, int]] | None = None,
+        update_coords: tuple[int | None, int | None, int | None, int | None] | None = None,
     ) -> OCRResult:
         image = Image.open(image_path).convert("RGB")
-        if update_coords:
-            (x1, y1), (x2, y2) = update_coords
+        if update_coords is not None:
+            current_region = self._scaled_region(user_id, screenshot_type, image.size)
+            x1, y1, x2, y2 = (
+                current if updated is None else updated
+                for current, updated in zip(current_region, update_coords)
+            )
             if x1 < 0 or y1 < 0 or x2 <= x1 or y2 <= y1 or x2 > image.width or y2 > image.height:
                 raise OCRFailure("coordinates must be inside the image and bottom-right must be below/right of top-left")
             setting = {"top_left": [x1, y1], "bottom_right": [x2, y2], "base_size": [image.width, image.height]}

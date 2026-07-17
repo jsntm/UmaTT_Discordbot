@@ -44,7 +44,10 @@ def parse_positive_int(value: int | str, label: str) -> int:
 
 
 def parse_date(value: str) -> str:
-    raw = value.strip().replace("-", "/")
+    raw = value.strip()
+    if raw.lower() == "today":
+        return datetime.now(timezone.utc).strftime("%m/%d/%Y")
+    raw = raw.replace("-", "/")
     for fmt in ("%m/%d/%Y", "%m/%d/%y"):
         try:
             parsed = datetime.strptime(raw, fmt)

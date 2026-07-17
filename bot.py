@@ -14,7 +14,15 @@ from ttbot.constants import ORDER_KEYS, SORT_KEYS, STRATEGIES, TRACKS
 from ttbot.names import NameMatcher
 from ttbot.ocr import OCRFailure, OCRService
 from ttbot.records import add_manual_record, delete_record_range, edit_record_score, preview_delete_records
-from ttbot.reporting import build_boxplot, build_records_export, build_summary_rows, format_summary_table, write_all_umas_csv, write_records_csv
+from ttbot.reporting import (
+    build_boxplot,
+    build_custom_boxplot,
+    build_records_export,
+    build_summary_rows,
+    format_summary_table,
+    write_all_umas_csv,
+    write_records_csv,
+)
 from ttbot.storage import UserStore
 from ttbot.team import (
     OCRAddResult,
@@ -26,6 +34,8 @@ from ttbot.team import (
     format_current_team,
     format_removed_uma,
     format_team_entry,
+    get_current_team_entries,
+    ocr_bijection_issues,
     replace_team_slot,
     swap_team_members,
     update_uma,
@@ -138,28 +148,71 @@ def raw_ocr_block(raw_text: str, *, limit: int = 900) -> str:
     return f"Raw OCR output:\n```text\n{raw}\n```"
 
 
-def format_ocr_added_records(result: OCRAddResult) -> str:
-    display_rows = [
-        {"ind": str(row.index), "uma": row.entry.name, "pts": f"{row.score:,}"}
-        for row in result.added
+def format_ocr_trial_tables(team_entries, trial_results: list[OCRAddResult | None], *, max_chars: int = 1800) -> list[str]:
+    ordered_ids: list[str] = []
+    entries_by_id = {entry.uma_id.lower(): entry for entry in team_entries}
+    for result in trial_results:
+        if result is None:
+            continue
+        for added in result.added:
+            uma_id = added.entry.uma_id.lower()
+            if uma_id not in ordered_ids:
+                ordered_ids.append(uma_id)
+    ordered_ids.extend(uma_id for uma_id in entries_by_id if uma_id not in ordered_ids)
+
+    trial_maps = [
+        {} if result is None else {added.entry.uma_id.lower(): added for added in result.added}
+        for result in trial_results
     ]
-    lines = []
-    if display_rows:
-        columns = [("ind", "ind"), ("uma", "uma"), ("pts", "pts")]
-        widths = {
-            key: max(len(label), *(len(record[key]) for record in display_rows))
-            for key, label in columns
-        }
+    trial_widths = []
+    for trial_index, records in enumerate(trial_maps, start=1):
+        values = [f"trial {trial_index}"]
+        values.extend(str(record.index) for record in records.values())
+        values.extend(f"{record.score:,}" for record in records.values())
+        trial_widths.append(max(len(value) for value in values))
 
-        def render(record: dict[str, str] | None = None) -> str:
-            values = {key: label if record is None else record[key] for key, label in columns}
-            return " | ".join(values[key].ljust(widths[key]) for key, _ in columns)
+    def render_values(label: str, values: list[str]) -> str:
+        return " | ".join([label.ljust(3), *(value.ljust(width) for value, width in zip(values, trial_widths))])
 
-        separator = "-+-".join("-" * widths[key] for key, _ in columns)
-        lines.append("```text\n" + "\n".join([render(), separator, *(render(row) for row in display_rows)]) + "\n```")
-    if result.warnings:
-        lines.append("Warnings:\n" + "\n".join(f"- {warning}" for warning in result.warnings))
-    return "\n".join(lines)
+    header = render_values("uma", [f"trial {index}" for index in range(1, len(trial_maps) + 1)])
+    table_width = max(len(header), *(len(entries_by_id[uma_id].name) for uma_id in ordered_ids))
+    header = header.ljust(table_width)
+    blocks = []
+    for uma_id in ordered_ids:
+        entry = entries_by_id[uma_id]
+        indexes = [str(records[uma_id].index) if uma_id in records else "" for records in trial_maps]
+        scores = [f"{records[uma_id].score:,}" if uma_id in records else "" for records in trial_maps]
+        name_line = entry.name + "-" * (table_width - len(entry.name))
+        blocks.append("\n".join([name_line, render_values("ind", indexes).ljust(table_width), render_values("pts", scores).ljust(table_width)]))
+
+    chunks: list[str] = []
+    current_blocks: list[str] = []
+    for block in blocks:
+        candidate = "```text\n" + "\n".join([header, *current_blocks, block]) + "\n```"
+        if current_blocks and len(candidate) > max_chars:
+            chunks.append("```text\n" + "\n".join([header, *current_blocks]) + "\n```")
+            current_blocks = [block]
+        else:
+            current_blocks.append(block)
+    if current_blocks:
+        chunks.append("```text\n" + "\n".join([header, *current_blocks]) + "\n```")
+    return chunks
+
+
+def format_bullet_messages(header: str, messages: list[str], *, max_chars: int = 1800) -> list[str]:
+    chunks = []
+    current = header
+    for message in messages:
+        bullet = f"- {message}"
+        candidate = current + "\n" + bullet
+        if current != header and len(candidate) > max_chars:
+            chunks.append(current)
+            current = header + "\n" + bullet
+        else:
+            current = candidate
+    if current != header:
+        chunks.append(current)
+    return chunks
 
 
 def format_change_ocr_message(result) -> str:
@@ -210,7 +263,7 @@ class RecordDeleteConfirmView(discord.ui.View):
     outfit="Outfit/style label, such as new years or festival",
     name="Uma name. Minor typos and common abbreviations are accepted.",
     rating="Positive integer rating",
-    date_acquired="MM/DD/YYYY or MM-DD-YYYY",
+    date_acquired="MM/DD/YYYY, MM-DD-YYYY, or today (UTC)",
 )
 async def team_replace(
     interaction: discord.Interaction,
@@ -294,35 +347,219 @@ async def team_edit(
         await respond(interaction, str(exc))
 
 
-@bot.tree.command(name="ocr", description="Read a top and bottom score screenshot and append records.")
-@app_commands.describe(top_image="Top screenshot", bottom_image="Bottom screenshot")
-async def ocr(interaction: discord.Interaction, top_image: discord.Attachment, bottom_image: discord.Attachment) -> None:
+async def _run_ocr_trials(
+    interaction: discord.Interaction,
+    image_pairs: list[tuple[discord.Attachment, discord.Attachment]],
+) -> None:
     await interaction.response.defer(thinking=True)
-    temp_paths: list[Path] = []
     try:
         store = store_for(interaction.user)
         ensure_full_team(store)
         with tempfile.TemporaryDirectory(dir=config.TMP_DIR) as tmp_name:
             tmp = Path(tmp_name)
-            top_path = tmp / f"top{Path(top_image.filename).suffix or '.jpg'}"
-            bottom_path = tmp / f"bottom{Path(bottom_image.filename).suffix or '.jpg'}"
-            await top_image.save(top_path)
-            await bottom_image.save(bottom_path)
-            temp_paths.extend([top_path, bottom_path])
+            trial_results: list[OCRAddResult | None] = []
+            trial_warnings: list[str] = []
+            failure_details: list[str] = []
+            for trial_index, (top, bottom) in enumerate(image_pairs, start=1):
+                top_path = tmp / f"trial-{trial_index}-top{Path(top.filename).suffix or '.jpg'}"
+                bottom_path = tmp / f"trial-{trial_index}-bottom{Path(bottom.filename).suffix or '.jpg'}"
+                await top.save(top_path)
+                await bottom.save(bottom_path)
 
-            top_result = await asyncio.to_thread(bot.ocr_service.process_image, store.user_id, top_path, "top", tmp)
-            bottom_result = await asyncio.to_thread(bot.ocr_service.process_image, store.user_id, bottom_path, "bottom", tmp)
-            rows = bot.ocr_service.merge_rows([top_result.rows, bottom_result.rows])
-            result = add_records_from_ocr(store, rows, interaction.created_at)
-            await respond(interaction, format_ocr_added_records(result))
-    except OCRFailure as exc:
-        await respond(interaction, exc.to_user_message())
+                screenshot_results = []
+                failures = []
+                for screenshot_type, image_path in (("top", top_path), ("bottom", bottom_path)):
+                    try:
+                        screenshot_results.append(
+                            await asyncio.to_thread(
+                                bot.ocr_service.process_image,
+                                store.user_id,
+                                image_path,
+                                screenshot_type,
+                                tmp,
+                            )
+                        )
+                    except OCRFailure as exc:
+                        failures.append(f"{screenshot_type}: {exc.message}")
+                        failure_details.append(f"Trial {trial_index} {screenshot_type}:\n{exc.to_user_message()}")
+                if failures:
+                    trial_results.append(None)
+                    trial_warnings.append(f"Trial {trial_index} was skipped ({'; '.join(failures)}).")
+                    continue
+
+                rows = bot.ocr_service.merge_rows(result.rows for result in screenshot_results)
+                issues = ocr_bijection_issues(store, rows)
+                if issues:
+                    trial_results.append(None)
+                    trial_warnings.append(f"Trial {trial_index} was skipped ({'; '.join(issues)}).")
+                    continue
+                result = add_records_from_ocr(store, rows, interaction.created_at)
+                trial_results.append(result)
+                trial_warnings.extend(f"Trial {trial_index}: {warning}" for warning in result.warnings)
+
+            team_entries = get_current_team_entries(store)
+            for table in format_ocr_trial_tables(team_entries, trial_results):
+                await respond(interaction, table)
+            for warning_message in format_bullet_messages("Warnings:", trial_warnings):
+                await respond(interaction, warning_message)
+            for failure_detail in failure_details:
+                await respond(interaction, failure_detail)
     except TeamError as exc:
         await respond(interaction, str(exc))
-    finally:
-        if not config.KEEP_IMAGES:
-            for path in temp_paths:
-                path.unlink(missing_ok=True)
+
+
+@bot.tree.command(name="ocr", description="Read up to five top and bottom screenshot pairs and append records.")
+@app_commands.describe(
+    top_image="Trial 1 top screenshot",
+    bottom_image="Trial 1 bottom screenshot",
+    top_image_2="Trial 2 top screenshot",
+    bottom_image_2="Trial 2 bottom screenshot",
+    top_image_3="Trial 3 top screenshot",
+    bottom_image_3="Trial 3 bottom screenshot",
+    top_image_4="Trial 4 top screenshot",
+    bottom_image_4="Trial 4 bottom screenshot",
+    top_image_5="Trial 5 top screenshot",
+    bottom_image_5="Trial 5 bottom screenshot",
+)
+async def ocr(
+    interaction: discord.Interaction,
+    top_image: discord.Attachment,
+    bottom_image: discord.Attachment,
+    top_image_2: Optional[discord.Attachment] = None,
+    bottom_image_2: Optional[discord.Attachment] = None,
+    top_image_3: Optional[discord.Attachment] = None,
+    bottom_image_3: Optional[discord.Attachment] = None,
+    top_image_4: Optional[discord.Attachment] = None,
+    bottom_image_4: Optional[discord.Attachment] = None,
+    top_image_5: Optional[discord.Attachment] = None,
+    bottom_image_5: Optional[discord.Attachment] = None,
+) -> None:
+    candidate_pairs = [
+        (top_image, bottom_image),
+        (top_image_2, bottom_image_2),
+        (top_image_3, bottom_image_3),
+        (top_image_4, bottom_image_4),
+        (top_image_5, bottom_image_5),
+    ]
+    image_pairs: list[tuple[discord.Attachment, discord.Attachment]] = []
+    found_gap = False
+    for trial_index, (top, bottom) in enumerate(candidate_pairs, start=1):
+        if top is None and bottom is None:
+            found_gap = True
+            continue
+        if top is None or bottom is None:
+            missing = "top" if top is None else "bottom"
+            await respond(interaction, f"Trial {trial_index} is missing its {missing} screenshot. Images must be supplied as complete top + bottom pairs.")
+            return
+        if found_gap:
+            await respond(interaction, "Screenshot pairs must be filled consecutively without skipping a trial.")
+            return
+        image_pairs.append((top, bottom))
+    await _run_ocr_trials(interaction, image_pairs)
+
+
+@bot.tree.command(name="ocr2", description="Read exactly two top and bottom screenshot pairs and append records.")
+@app_commands.describe(
+    top_1="Trial 1 top screenshot",
+    bottom_1="Trial 1 bottom screenshot",
+    top_2="Trial 2 top screenshot",
+    bottom_2="Trial 2 bottom screenshot",
+)
+async def ocr2(
+    interaction: discord.Interaction,
+    top_1: discord.Attachment,
+    bottom_1: discord.Attachment,
+    top_2: discord.Attachment,
+    bottom_2: discord.Attachment,
+) -> None:
+    await _run_ocr_trials(interaction, [(top_1, bottom_1), (top_2, bottom_2)])
+
+
+@bot.tree.command(name="ocr3", description="Read exactly three top and bottom screenshot pairs and append records.")
+@app_commands.describe(
+    top_1="Trial 1 top screenshot",
+    bottom_1="Trial 1 bottom screenshot",
+    top_2="Trial 2 top screenshot",
+    bottom_2="Trial 2 bottom screenshot",
+    top_3="Trial 3 top screenshot",
+    bottom_3="Trial 3 bottom screenshot",
+)
+async def ocr3(
+    interaction: discord.Interaction,
+    top_1: discord.Attachment,
+    bottom_1: discord.Attachment,
+    top_2: discord.Attachment,
+    bottom_2: discord.Attachment,
+    top_3: discord.Attachment,
+    bottom_3: discord.Attachment,
+) -> None:
+    await _run_ocr_trials(interaction, [(top_1, bottom_1), (top_2, bottom_2), (top_3, bottom_3)])
+
+
+@bot.tree.command(name="ocr4", description="Read exactly four top and bottom screenshot pairs and append records.")
+@app_commands.describe(
+    top_1="Trial 1 top screenshot",
+    bottom_1="Trial 1 bottom screenshot",
+    top_2="Trial 2 top screenshot",
+    bottom_2="Trial 2 bottom screenshot",
+    top_3="Trial 3 top screenshot",
+    bottom_3="Trial 3 bottom screenshot",
+    top_4="Trial 4 top screenshot",
+    bottom_4="Trial 4 bottom screenshot",
+)
+async def ocr4(
+    interaction: discord.Interaction,
+    top_1: discord.Attachment,
+    bottom_1: discord.Attachment,
+    top_2: discord.Attachment,
+    bottom_2: discord.Attachment,
+    top_3: discord.Attachment,
+    bottom_3: discord.Attachment,
+    top_4: discord.Attachment,
+    bottom_4: discord.Attachment,
+) -> None:
+    await _run_ocr_trials(
+        interaction,
+        [(top_1, bottom_1), (top_2, bottom_2), (top_3, bottom_3), (top_4, bottom_4)],
+    )
+
+
+@bot.tree.command(name="ocr5", description="Read exactly five top and bottom screenshot pairs and append records.")
+@app_commands.describe(
+    top_1="Trial 1 top screenshot",
+    bottom_1="Trial 1 bottom screenshot",
+    top_2="Trial 2 top screenshot",
+    bottom_2="Trial 2 bottom screenshot",
+    top_3="Trial 3 top screenshot",
+    bottom_3="Trial 3 bottom screenshot",
+    top_4="Trial 4 top screenshot",
+    bottom_4="Trial 4 bottom screenshot",
+    top_5="Trial 5 top screenshot",
+    bottom_5="Trial 5 bottom screenshot",
+)
+async def ocr5(
+    interaction: discord.Interaction,
+    top_1: discord.Attachment,
+    bottom_1: discord.Attachment,
+    top_2: discord.Attachment,
+    bottom_2: discord.Attachment,
+    top_3: discord.Attachment,
+    bottom_3: discord.Attachment,
+    top_4: discord.Attachment,
+    bottom_4: discord.Attachment,
+    top_5: discord.Attachment,
+    bottom_5: discord.Attachment,
+) -> None:
+    await _run_ocr_trials(
+        interaction,
+        [
+            (top_1, bottom_1),
+            (top_2, bottom_2),
+            (top_3, bottom_3),
+            (top_4, bottom_4),
+            (top_5, bottom_5),
+        ],
+    )
 
 
 @bot.tree.command(name="record-edit", description="Edit the score for one record by its records.csv row index.")
@@ -405,9 +642,6 @@ async def change_ocr(
 ) -> None:
     await interaction.response.defer(thinking=True)
     provided = [top_left_x, top_left_y, bottom_right_x, bottom_right_y]
-    if any(value is not None for value in provided) and any(value is None for value in provided):
-        await respond(interaction, "Provide all four crop coordinates: top_left_x, top_left_y, bottom_right_x, bottom_right_y.")
-        return
 
     with tempfile.TemporaryDirectory(dir=config.TMP_DIR) as tmp_name:
         tmp = Path(tmp_name)
@@ -415,8 +649,8 @@ async def change_ocr(
         await image.save(image_path)
         try:
             coords = None
-            if all(value is not None for value in provided):
-                coords = ((int(top_left_x), int(top_left_y)), (int(bottom_right_x), int(bottom_right_y)))
+            if any(value is not None for value in provided):
+                coords = (top_left_x, top_left_y, bottom_right_x, bottom_right_y)
             result = await asyncio.to_thread(
                 bot.ocr_service.process_image,
                 str(interaction.user.id),
@@ -529,6 +763,43 @@ async def box_and_whisker(
             await respond(interaction, f"Box and whisker for {target_label}", file=discord.File(path, filename="box-and-whisker.png"))
     except TeamError as exc:
         await respond(interaction, f"Box and whisker for {target_label}\n{exc}")
+
+
+@bot.tree.command(name="box-and-whisker-custom", description="Plot score distributions for a custom set of umas and configurations.")
+@app_commands.rename(merge_same_uma="merge-same-uma")
+@app_commands.choices(sort=sort_choices, order=order_choices)
+@app_commands.describe(
+    umas="Comma-separated uma IDs, current, or all, with optional track/ace/style specifiers",
+    merge_same_uma="Merge each requested selector into one column",
+    sort="Sort metric",
+    order="ascending or descending",
+    user="Discord user, defaults to you",
+)
+async def box_and_whisker_custom(
+    interaction: discord.Interaction,
+    umas: str,
+    merge_same_uma: bool = False,
+    sort: str = "median",
+    order: str = "descending",
+    user: Optional[discord.User] = None,
+) -> None:
+    await interaction.response.defer(thinking=True)
+    target = target_user_or_sender(interaction, user)
+    target_label = user_label(target)
+    try:
+        with tempfile.TemporaryDirectory(dir=config.TMP_DIR) as tmp_name:
+            path = Path(tmp_name) / "box-and-whisker-custom.png"
+            build_custom_boxplot(store_for(target), path, umas, merge_same_uma, sort, order)
+            if path.stat().st_size > upload_limit(interaction):
+                await respond(interaction, f"Custom box and whisker for {target_label}\nThat plot is too large for a Discord message.")
+                return
+            await respond(
+                interaction,
+                f"Custom box and whisker for {target_label}",
+                file=discord.File(path, filename="box-and-whisker-custom.png"),
+            )
+    except TeamError as exc:
+        await respond(interaction, f"Custom box and whisker for {target_label}\n{exc}")
 
 
 @bot.tree.error

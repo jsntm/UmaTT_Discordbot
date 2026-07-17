@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from collections import Counter
 from dataclasses import dataclass
 from datetime import datetime, timezone
 
@@ -380,6 +381,33 @@ def _display_date(value: str) -> str:
 
 def get_team_name_map(store: UserStore) -> dict[str, JoinedUma]:
     return {entry.name.lower(): entry for entry in _current_joined(store)}
+
+
+def get_current_team_entries(store: UserStore) -> list[JoinedUma]:
+    track_order = {track: index for index, track in enumerate(TRACKS)}
+    return sorted(
+        _current_joined(store),
+        key=lambda entry: (track_order.get(entry.track, 99), int(entry.position) if entry.position.isdigit() else 99),
+    )
+
+
+def ocr_bijection_issues(store: UserStore, rows: list[OCRRow]) -> list[str]:
+    name_map = get_team_name_map(store)
+    counts = Counter(row.name.lower() for row in rows)
+    recognized = set(counts)
+    current_names = set(name_map)
+    issues = []
+    extras = sorted(recognized - current_names)
+    duplicates = sorted(name for name, count in counts.items() if count > 1)
+    missing = sorted(current_names - recognized)
+    recognized_names = {row.name.lower(): row.name for row in rows}
+    if extras:
+        issues.append("names not in the current team: " + ", ".join(recognized_names[name] for name in extras))
+    if duplicates:
+        issues.append("duplicate names: " + ", ".join(name_map[name].name if name in name_map else recognized_names[name] for name in duplicates))
+    if missing:
+        issues.append("missing names: " + ", ".join(name_map[name].name for name in missing))
+    return issues
 
 
 def add_records_from_ocr(store: UserStore, rows: list[OCRRow], timestamp: datetime) -> OCRAddResult:

@@ -67,7 +67,6 @@ More details on each slash command can be found in discord when using the bot.
 
 Runtime data is stored per Discord user:
 ```
-text
 data/
   ocr_settings.json
   users/
