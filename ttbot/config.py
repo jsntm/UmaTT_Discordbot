@@ -12,6 +12,7 @@ USERS_DIR = DATA_DIR / "users"
 TMP_DIR = DATA_DIR / "tmp"
 MPLCONFIG_DIR = DATA_DIR / "matplotlib"
 OCR_SETTINGS_FILE = DATA_DIR / "ocr_settings.json"
+STITCH_SETTINGS_FILE = DATA_DIR / "stitch_settings.json"
 os.environ.setdefault("MPLCONFIGDIR", str(MPLCONFIG_DIR))
 
 KEEP_IMAGES = os.environ.get("UMA_BOT_KEEP_IMAGES", "").strip().lower() in {"1", "true", "yes", "on"}

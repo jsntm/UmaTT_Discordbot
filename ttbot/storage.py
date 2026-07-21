@@ -8,7 +8,13 @@ from pathlib import Path
 from typing import Iterable
 
 from ttbot import config
-from ttbot.constants import ALL_UMAS_COLUMNS, CURRENT_TEAM_COLUMNS, DEFAULT_OCR_SETTINGS, RECORDS_COLUMNS
+from ttbot.constants import (
+    ALL_UMAS_COLUMNS,
+    CURRENT_TEAM_COLUMNS,
+    DEFAULT_OCR_SETTINGS,
+    DEFAULT_STITCH_SETTINGS,
+    RECORDS_COLUMNS,
+)
 
 
 def _read_csv(path: Path, columns: list[str]) -> list[dict[str, str]]:
@@ -96,28 +102,50 @@ class UserStore:
         return sum(1 for row in self.read_records() if row["uma_id"].lower() == uma_id.lower())
 
 
-def _read_all_settings() -> dict[str, dict[str, dict[str, list[int]]]]:
-    if not config.OCR_SETTINGS_FILE.exists():
+def _read_settings_file(path: Path) -> dict[str, object]:
+    if not path.exists():
         return {}
     try:
-        return json.loads(config.OCR_SETTINGS_FILE.read_text(encoding="utf-8"))
-    except json.JSONDecodeError:
+        settings = json.loads(path.read_text(encoding="utf-8"))
+        return settings if isinstance(settings, dict) else {}
+    except (json.JSONDecodeError, OSError):
         return {}
 
 
-def _write_all_settings(settings: dict[str, object]) -> None:
-    config.OCR_SETTINGS_FILE.parent.mkdir(parents=True, exist_ok=True)
-    config.OCR_SETTINGS_FILE.write_text(json.dumps(settings, indent=2, sort_keys=True), encoding="utf-8")
+def _write_settings_file(path: Path, settings: dict[str, object]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(settings, indent=2, sort_keys=True), encoding="utf-8")
 
 
 def get_ocr_setting(user_id: str, screenshot_type: str) -> dict[str, list[int]]:
-    settings = _read_all_settings()
+    settings = _read_settings_file(config.OCR_SETTINGS_FILE)
     user_settings = settings.get(str(user_id), {})
+    if not isinstance(user_settings, dict):
+        user_settings = {}
     selected = user_settings.get(screenshot_type) or DEFAULT_OCR_SETTINGS[screenshot_type]
     return json.loads(json.dumps(selected))
 
 
 def set_ocr_setting(user_id: str, screenshot_type: str, setting: dict[str, list[int]]) -> None:
-    settings = _read_all_settings()
-    settings.setdefault(str(user_id), {})[screenshot_type] = setting
-    _write_all_settings(settings)
+    settings = _read_settings_file(config.OCR_SETTINGS_FILE)
+    user_settings = settings.setdefault(str(user_id), {})
+    if not isinstance(user_settings, dict):
+        user_settings = {}
+        settings[str(user_id)] = user_settings
+    user_settings[screenshot_type] = setting
+    _write_settings_file(config.OCR_SETTINGS_FILE, settings)
+
+
+def get_stitch_setting(user_id: str) -> dict[str, int | float]:
+    settings = _read_settings_file(config.STITCH_SETTINGS_FILE)
+    saved = settings.get(str(user_id), {})
+    if not isinstance(saved, dict):
+        saved = {}
+    selected = {**DEFAULT_STITCH_SETTINGS, **saved}
+    return {key: selected[key] for key in DEFAULT_STITCH_SETTINGS}
+
+
+def set_stitch_setting(user_id: str, setting: dict[str, int | float]) -> None:
+    settings = _read_settings_file(config.STITCH_SETTINGS_FILE)
+    settings[str(user_id)] = {key: setting[key] for key in DEFAULT_STITCH_SETTINGS}
+    _write_settings_file(config.STITCH_SETTINGS_FILE, settings)

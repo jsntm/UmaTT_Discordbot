@@ -23,7 +23,8 @@ from ttbot.reporting import (
     write_all_umas_csv,
     write_records_csv,
 )
-from ttbot.storage import UserStore
+from ttbot.storage import UserStore, get_stitch_setting, set_stitch_setting
+from ttbot.stitching import StitchingError, parse_stitch_settings, stitch_image_sequence
 from ttbot.team import (
     OCRAddResult,
     TeamError,
@@ -213,6 +214,18 @@ def format_bullet_messages(header: str, messages: list[str], *, max_chars: int =
     if current != header:
         chunks.append(current)
     return chunks
+
+
+def format_stitch_settings(settings) -> str:
+    threshold = f"{settings.similarity_threshold:g}%"
+    rows = [
+        ("crop_top", f"{settings.crop_top} px"),
+        ("crop_bottom", f"{settings.crop_bottom} px"),
+        ("window_height", f"{settings.window_height} px"),
+        ("similarity_threshold", threshold),
+    ]
+    width = max(len(label) for label, _ in rows)
+    return "```text\n" + "\n".join(f"{label.ljust(width)} | {value}" for label, value in rows) + "\n```"
 
 
 def format_change_ocr_message(result) -> str:
@@ -560,6 +573,137 @@ async def ocr5(
             (top_5, bottom_5),
         ],
     )
+
+
+@bot.tree.command(name="stitch", description="Stitch two to ten vertically-scrolled screenshots in order.")
+@app_commands.describe(
+    image_1="First screenshot (top of the scroll)",
+    image_2="Second screenshot",
+    image_3="Optional third screenshot",
+    image_4="Optional fourth screenshot",
+    image_5="Optional fifth screenshot",
+    image_6="Optional sixth screenshot",
+    image_7="Optional seventh screenshot",
+    image_8="Optional eighth screenshot",
+    image_9="Optional ninth screenshot",
+    image_10="Optional tenth screenshot",
+    debug="Include pairwise alignment overlays",
+)
+async def stitch(
+    interaction: discord.Interaction,
+    image_1: discord.Attachment,
+    image_2: discord.Attachment,
+    image_3: Optional[discord.Attachment] = None,
+    image_4: Optional[discord.Attachment] = None,
+    image_5: Optional[discord.Attachment] = None,
+    image_6: Optional[discord.Attachment] = None,
+    image_7: Optional[discord.Attachment] = None,
+    image_8: Optional[discord.Attachment] = None,
+    image_9: Optional[discord.Attachment] = None,
+    image_10: Optional[discord.Attachment] = None,
+    debug: bool = False,
+) -> None:
+    candidates = [image_1, image_2, image_3, image_4, image_5, image_6, image_7, image_8, image_9, image_10]
+    attachments = []
+    found_gap = False
+    for index, attachment in enumerate(candidates, start=1):
+        if attachment is None:
+            found_gap = True
+            continue
+        if found_gap:
+            await respond(interaction, f"Images must be filled consecutively; image_{index} was provided after an empty image field.")
+            return
+        attachments.append(attachment)
+
+    await interaction.response.defer(thinking=True)
+    with tempfile.TemporaryDirectory(dir=config.TMP_DIR) as tmp_name:
+        tmp = Path(tmp_name)
+        image_paths = []
+        try:
+            settings = parse_stitch_settings(get_stitch_setting(str(interaction.user.id)))
+            for index, attachment in enumerate(attachments, start=1):
+                suffix = Path(attachment.filename).suffix or ".img"
+                image_path = tmp / f"input-{index:02d}{suffix}"
+                await attachment.save(image_path)
+                image_paths.append(image_path)
+
+            result = await asyncio.to_thread(
+                stitch_image_sequence,
+                image_paths,
+                crop_top=settings.crop_top,
+                crop_bottom=settings.crop_bottom,
+                window_height=settings.window_height,
+                similarity_threshold=settings.similarity_fraction,
+                debug=debug,
+                debug_dir=tmp / "debug",
+            )
+            output_path = tmp / "stitched.png"
+            await asyncio.to_thread(result.image.save, output_path, "PNG", optimize=True)
+            output_paths = [output_path, *result.debug_paths]
+            oversized = [path for path in output_paths if path.stat().st_size > upload_limit(interaction)]
+            if output_path in oversized:
+                await respond(interaction, "The stitched image is too large for a Discord attachment.")
+                return
+            send_paths = [path for path in output_paths if path not in oversized]
+            content = f"Stitched {len(attachments)} images into {result.image.width} x {result.image.height} pixels."
+            if oversized:
+                content += f" {len(oversized)} oversized debug image(s) were omitted."
+            await respond_files(
+                interaction,
+                content,
+                files=[discord.File(path, filename=path.name) for path in send_paths],
+            )
+        except StitchingError as exc:
+            partial_path = tmp / "partial-stitch.png"
+            failed_path = tmp / f"failed-image-{exc.image_index:02d}.png"
+            await asyncio.to_thread(exc.partial_stitch.save, partial_path, "PNG", optimize=True)
+            await asyncio.to_thread(exc.failed_image.save, failed_path, "PNG", optimize=True)
+            diagnostic_paths = [*exc.debug_paths[-8:], partial_path, failed_path]
+            send_paths = [path for path in diagnostic_paths if path.stat().st_size <= upload_limit(interaction)]
+            message = f"Could not stitch the screenshots: {exc}"
+            if len(send_paths) != len(diagnostic_paths):
+                message += " Some diagnostic images were too large for Discord."
+            if send_paths:
+                await respond_files(
+                    interaction,
+                    message,
+                    files=[discord.File(path, filename=path.name) for path in send_paths],
+                )
+            else:
+                await respond(interaction, message)
+        except (OSError, ValueError) as exc:
+            await respond(interaction, f"Could not stitch the screenshots: {exc}")
+
+
+@bot.tree.command(name="change-stitch", description="Show or update your screenshot stitching settings.")
+@app_commands.describe(
+    crop_top="Pixels cropped from the top of the final image",
+    crop_bottom="Pixels cropped from the bottom of the final image",
+    window_height="Comparison window height in pixels",
+    similarity_threshold="Required similarity percentage from 0 to 100",
+)
+async def change_stitch(
+    interaction: discord.Interaction,
+    crop_top: Optional[int] = None,
+    crop_bottom: Optional[int] = None,
+    window_height: Optional[int] = None,
+    similarity_threshold: Optional[float] = None,
+) -> None:
+    values = get_stitch_setting(str(interaction.user.id))
+    updates = {
+        "crop_top": crop_top,
+        "crop_bottom": crop_bottom,
+        "window_height": window_height,
+        "similarity_threshold": similarity_threshold,
+    }
+    values.update({key: value for key, value in updates.items() if value is not None})
+    try:
+        settings = parse_stitch_settings(values)
+    except ValueError as exc:
+        await respond(interaction, str(exc))
+        return
+    set_stitch_setting(str(interaction.user.id), settings.as_dict())
+    await respond(interaction, "Stitch settings updated:\n" + format_stitch_settings(settings))
 
 
 @bot.tree.command(name="record-edit", description="Edit the score for one record by its records.csv row index.")

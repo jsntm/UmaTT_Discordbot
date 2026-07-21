@@ -38,3 +38,10 @@ DEFAULT_OCR_SETTINGS = {
         "base_size": [1080, 2340],
     },
 }
+
+DEFAULT_STITCH_SETTINGS = {
+    "crop_top": 0,
+    "crop_bottom": 0,
+    "window_height": 50,
+    "similarity_threshold": 99,
+}
