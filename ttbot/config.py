@@ -5,7 +5,13 @@ from pathlib import Path
 
 
 ROOT_DIR = Path(__file__).resolve().parent.parent
-REFERENCE_NAMES_FILE = ROOT_DIR / "reference_data" / "all_uma_names.txt"
+REFERENCE_DATA_DIR = ROOT_DIR / "reference_data"
+REFERENCE_CSV_FILE = REFERENCE_DATA_DIR / "uma_id_outfits.csv"
+UMA_NAMES_FILE = REFERENCE_DATA_DIR / "uma_names.json"
+OUTFIT_NAMES_FILE = REFERENCE_DATA_DIR / "outfit_names.json"
+UMA_NAME_ALIASES_FILE = REFERENCE_DATA_DIR / "uma_name_aliases.json"
+OUTFIT_NAME_ALIASES_FILE = REFERENCE_DATA_DIR / "outfit_name_aliases.json"
+UMA_THUMBS_DIR = REFERENCE_DATA_DIR / "uma_thumbs"
 TOKEN_FILE = ROOT_DIR / "umaTTauth.txt"
 DATA_DIR = Path(os.environ.get("UMA_BOT_DATA_DIR", ROOT_DIR / "data"))
 USERS_DIR = DATA_DIR / "users"

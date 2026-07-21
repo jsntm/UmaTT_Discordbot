@@ -111,6 +111,13 @@ def _validate_name(matcher: NameMatcher, raw_name: str) -> str:
     return match.name
 
 
+def _validate_outfit(matcher: NameMatcher, official_name: str, raw_outfit: str) -> str:
+    match = matcher.match_outfit(official_name, raw_outfit)
+    if not match:
+        raise TeamError(f"outfit `{raw_outfit}` did not match a known outfit for {official_name} closely enough.")
+    return match.outfit
+
+
 def _validate_common(track: str, position: int, strategy: str, rating: int | None = None, date_acquired: str | None = None) -> tuple[str, int, str, int | None, str | None]:
     try:
         parsed_track = parse_track(track)
@@ -171,6 +178,7 @@ def replace_team_slot(
 ) -> ReplaceResult:
     parsed_track, parsed_position, parsed_strategy, parsed_rating, parsed_date = _validate_common(track, position, strategy, rating, date_acquired)
     official_name = _validate_name(matcher, name)
+    official_outfit = _validate_outfit(matcher, official_name, outfit)
     current_rows = store.read_current_team()
     existing_slot = next((row for row in current_rows if row["track"] == parsed_track and int(row["position"]) == parsed_position), None)
     ignore = existing_slot["uma_id"] if existing_slot else None
@@ -180,7 +188,7 @@ def replace_team_slot(
     uma_id = store.generate_uma_id()
     new_all = {
         "uma_id": uma_id,
-        "outfit": outfit.strip(),
+        "outfit": official_outfit,
         "name": official_name,
         "rating": str(parsed_rating),
         "date_acquired": parsed_date,
@@ -283,13 +291,15 @@ def update_uma(
     current_row = next((row for row in current_rows if row["uma_id"].lower() == uma_id), None)
     old_entry = _join(dict(all_row), dict(current_row) if current_row else None)
 
+    target_name = all_row["name"]
     if name is not None:
         official_name = _validate_name(matcher, name)
         if current_row:
             _check_name_available(store, official_name, ignore_uma_id=uma_id)
         all_row["name"] = official_name
-    if outfit is not None:
-        all_row["outfit"] = outfit.strip()
+        target_name = official_name
+    if outfit is not None or name is not None:
+        all_row["outfit"] = _validate_outfit(matcher, target_name, outfit if outfit is not None else all_row["outfit"])
     if rating is not None:
         try:
             all_row["rating"] = str(parse_positive_int(rating, "rating"))
@@ -341,19 +351,27 @@ def format_current_team(store: UserStore, *, show_missing: bool = False) -> str:
             row = by_slot.get((track, position))
             label = f"{track} {position}"
             if not row:
-                table_rows.append({"track": label, "name": "MISSING" if show_missing else "empty", "rating": "", "date": ""})
+                table_rows.append({"track": label, "name": "MISSING" if show_missing else "empty", "id": "", "rating": "", "date": ""})
                 continue
             uma = all_by_id.get(row["uma_id"].lower())
             if not uma:
-                table_rows.append({"track": label, "name": f"missing uma {format_uma_id(row['uma_id'])}", "rating": "", "date": ""})
+                table_rows.append({"track": label, "name": "missing uma", "id": row["uma_id"], "rating": "", "date": ""})
                 continue
             date_text = _display_date(uma["date_acquired"])
-            table_rows.append({"track": label, "name": f"{uma['name']} ({uma['outfit']})", "rating": uma["rating"], "date": date_text})
+            table_rows.append(
+                {
+                    "track": label,
+                    "name": f"{uma['name']} ({uma['outfit']})",
+                    "id": uma["uma_id"],
+                    "rating": uma["rating"],
+                    "date": date_text,
+                }
+            )
     return _format_current_team_table(table_rows)
 
 
 def _format_current_team_table(rows: list[dict[str, str]]) -> str:
-    columns = [("track", "track"), ("name", "name (outfit)"), ("rating", "rating"), ("date", "date")]
+    columns = [("track", "track"), ("name", "name (outfit)"), ("id", "id"), ("rating", "rating"), ("date", "date")]
     widths = {
         key: max(len(label), *(len(str(row[key])) for row in rows))
         for key, label in columns

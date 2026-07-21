@@ -13,6 +13,7 @@ from ttbot import config
 from ttbot.constants import ORDER_KEYS, SORT_KEYS, STRATEGIES, TRACKS
 from ttbot.names import NameMatcher
 from ttbot.ocr import OCRFailure, OCRService
+from ttbot.reference_data import download_missing_thumbnails, generate_reference_files
 from ttbot.records import add_manual_record, delete_record_range, edit_record_score, preview_delete_records
 from ttbot.reporting import (
     build_boxplot,
@@ -44,12 +45,21 @@ from ttbot.team import (
 from ttbot.validation import normalize_uma_id
 
 
+REFERENCE_ROWS = generate_reference_files()
+
+
 class UmaBot(discord.Client):
     def __init__(self) -> None:
         intents = discord.Intents.default()
         super().__init__(intents=intents)
         self.tree = app_commands.CommandTree(self)
-        self.name_matcher = NameMatcher.from_reference_file(config.REFERENCE_NAMES_FILE)
+        self.name_matcher = NameMatcher.from_reference_files(
+            config.UMA_NAMES_FILE,
+            config.UMA_NAME_ALIASES_FILE,
+            config.OUTFIT_NAMES_FILE,
+            config.OUTFIT_NAME_ALIASES_FILE,
+            config.UMA_THUMBS_DIR,
+        )
         self.ocr_service = OCRService(self.name_matcher)
 
     async def setup_hook(self) -> None:
@@ -273,7 +283,7 @@ class RecordDeleteConfirmView(discord.ui.View):
     track="sprint, mile, medium, long, or dirt",
     position="1 is ace; 2 and 3 are the other runners",
     strategy="front, pace, late, or end",
-    outfit="Outfit/style label, such as new years or festival",
+    outfit="Uma outfit name; minor typos and configured aliases are accepted",
     name="Uma name. Minor typos and common abbreviations are accepted.",
     rating="Positive integer rating",
     date_acquired="MM/DD/YYYY, MM-DD-YYYY, or today (UTC)",
@@ -326,7 +336,7 @@ async def team_swap(interaction: discord.Interaction, uma_1_id: str, uma_2_id: s
     track="Optional new track",
     position="Optional new team position",
     strategy="Optional new strategy",
-    outfit="Optional new outfit/style label",
+    outfit="Optional official or fuzzy-matched outfit name",
     name="Optional new uma name",
     rating="Optional new rating",
     date_acquired="Optional new acquisition date",
@@ -815,13 +825,17 @@ async def change_ocr(
 
 
 @bot.tree.command(name="get-records", description="Export score records as a CSV.")
-@app_commands.describe(user="Discord user, defaults to you", scope="current, all, or a five-character uma code")
-async def get_records(interaction: discord.Interaction, scope: str = "current", user: Optional[discord.User] = None) -> None:
+@app_commands.rename(record_filter="filter")
+@app_commands.describe(
+    user="Discord user, defaults to you",
+    record_filter="Uma name/ID, current, or all, plus optional dash-separated specifiers",
+)
+async def get_records(interaction: discord.Interaction, record_filter: str = "all", user: Optional[discord.User] = None) -> None:
     target = target_user_or_sender(interaction, user)
     target_label = user_label(target)
     try:
         store = store_for(target)
-        rows = build_records_export(store, scope)
+        rows = build_records_export(store, record_filter, bot.name_matcher)
         with tempfile.TemporaryDirectory(dir=config.TMP_DIR) as tmp_name:
             path = Path(tmp_name) / "records.csv"
             write_records_csv(path, rows)
@@ -900,7 +914,7 @@ async def box_and_whisker(
     try:
         with tempfile.TemporaryDirectory(dir=config.TMP_DIR) as tmp_name:
             path = Path(tmp_name) / "box-and-whisker.png"
-            build_boxplot(store_for(target), path, sort, order)
+            build_boxplot(store_for(target), path, sort, order, bot.name_matcher)
             if path.stat().st_size > upload_limit(interaction):
                 await respond(interaction, f"Box and whisker for {target_label}\nThat plot is too large for a Discord message.")
                 return
@@ -913,10 +927,11 @@ async def box_and_whisker(
 @app_commands.rename(merge_same_uma="merge-same-uma")
 @app_commands.choices(sort=sort_choices, order=order_choices)
 @app_commands.describe(
-    umas="Comma-separated uma IDs, current, or all, with optional track/ace/style specifiers",
+    umas="Comma-separated Uma names/IDs, current, or all; use dashes before specifiers",
     merge_same_uma="Merge each requested selector into one column",
     sort="Sort metric",
     order="ascending or descending",
+    date_after="Only include Umas acquired on/after this date (MM/DD/YYYY or MM-DD-YYYY)",
     user="Discord user, defaults to you",
 )
 async def box_and_whisker_custom(
@@ -925,6 +940,7 @@ async def box_and_whisker_custom(
     merge_same_uma: bool = False,
     sort: str = "median",
     order: str = "descending",
+    date_after: Optional[str] = None,
     user: Optional[discord.User] = None,
 ) -> None:
     await interaction.response.defer(thinking=True)
@@ -933,7 +949,16 @@ async def box_and_whisker_custom(
     try:
         with tempfile.TemporaryDirectory(dir=config.TMP_DIR) as tmp_name:
             path = Path(tmp_name) / "box-and-whisker-custom.png"
-            build_custom_boxplot(store_for(target), path, umas, merge_same_uma, sort, order)
+            build_custom_boxplot(
+                store_for(target),
+                path,
+                umas,
+                merge_same_uma,
+                sort,
+                order,
+                bot.name_matcher,
+                date_after,
+            )
             if path.stat().st_size > upload_limit(interaction):
                 await respond(interaction, f"Custom box and whisker for {target_label}\nThat plot is too large for a Discord message.")
                 return
@@ -955,6 +980,12 @@ async def on_app_command_error(interaction: discord.Interaction, error: app_comm
 
 
 def main() -> None:
+    thumbnails = download_missing_thumbnails(REFERENCE_ROWS)
+    print(f"Uma thumbnails: downloaded {thumbnails.downloaded}, skipped {thumbnails.skipped}, failed {len(thumbnails.failures)}")
+    for failure in thumbnails.failures[:10]:
+        print(f"Thumbnail download failed: {failure}")
+    if len(thumbnails.failures) > 10:
+        print(f"... and {len(thumbnails.failures) - 10} more thumbnail download failures")
     token = config.read_discord_token()
     bot.run(token)
 

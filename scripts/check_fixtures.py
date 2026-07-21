@@ -12,6 +12,7 @@ if str(ROOT) not in sys.path:
 
 from ttbot import config
 from ttbot.names import NameMatcher
+from ttbot.reference_data import generate_reference_files
 from ttbot.ocr import OCRFailure, OCRService
 
 
@@ -66,7 +67,14 @@ def check_provider(service: OCRService, fixture_folders: list[Path], provider: s
 
 
 def main() -> None:
-    matcher = NameMatcher.from_reference_file(config.REFERENCE_NAMES_FILE)
+    generate_reference_files()
+    matcher = NameMatcher.from_reference_files(
+        config.UMA_NAMES_FILE,
+        config.UMA_NAME_ALIASES_FILE,
+        config.OUTFIT_NAMES_FILE,
+        config.OUTFIT_NAME_ALIASES_FILE,
+        config.UMA_THUMBS_DIR,
+    )
     service = OCRService(matcher)
     fixture_root = config.ROOT_DIR / "test_screenshots"
     fixture_folders = sorted([folder for folder in fixture_root.iterdir() if folder.is_dir()], key=lambda path: path.name)
