@@ -450,6 +450,12 @@ def _translation_candidates(
     static_cutoff = max(min_shift, 4, min(50, round(min(previous.height, next_image.height) * 0.02)))
     moving_candidates = [candidate for candidate in candidates if candidate.y_shift >= static_cutoff]
     ranked = moving_candidates or candidates
+    advancing_candidates = [
+        candidate
+        for candidate in ranked
+        if candidate.y_shift + next_image.height > previous.height
+    ]
+    ranked = advancing_candidates or ranked
     return sorted(ranked, key=lambda candidate: candidate.rank, reverse=True)
 
 
