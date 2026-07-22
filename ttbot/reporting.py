@@ -532,7 +532,7 @@ def _render_boxplot(
     fig.patch.set_facecolor("#f8fafc")
     ax.set_facecolor("#ffffff")
     fig.subplots_adjust(left=0.08, right=0.98, top=0.9, bottom=0.52 if wrap_labels else 0.43)
-    fig.savefig(path)
+    fig.savefig(path, bbox_inches="tight", pad_inches=0.2)
     plt.close(fig)
 
 
@@ -633,8 +633,6 @@ def build_custom_boxplot_series(
     order = _normalize_order(order)
     selectors = parse_uma_selectors(store, umas, matcher)
     all_rows = _all_by_id(store)
-    current_rows = _current_by_id(store)
-    current_ids = set(current_rows)
     eligible_ids = _eligible_uma_ids(all_rows, _date_cutoff(date_after))
 
     scores_by_config: dict[ConfigKey, list[int]] = {}
@@ -671,6 +669,7 @@ def build_custom_boxplot_series(
                 continue
             configs = matching_configs(selector)
             scores = [score for key in configs for score in scores_by_config.get(key, [])]
+            represented_configs = set(configs)
             represented_ids = {key[0] for key in configs} or selectable_ids
             represented_tracks = {key[1] for key in configs}
             represented_statuses = {key[2] for key in configs}
@@ -685,7 +684,7 @@ def build_custom_boxplot_series(
                     scores=scores,
                     track=representative_track,
                     position=representative_position,
-                    is_current=bool(represented_ids) and represented_ids <= current_ids,
+                    is_current=bool(represented_configs) and represented_configs <= current_configs,
                     thumbnail_path=_thumbnail_for_ids(represented_ids, all_rows, matcher),
                 )
             )
@@ -704,7 +703,7 @@ def build_custom_boxplot_series(
                         scores=list(scores_by_config.get(key, [])),
                         track=track,
                         position="1" if ace_status == "ace" else "2",
-                        is_current=uma_id in current_ids,
+                        is_current=key in current_configs,
                         thumbnail_path=matcher.thumbnail_path(uma["name"], uma["outfit"]),
                     )
                 )

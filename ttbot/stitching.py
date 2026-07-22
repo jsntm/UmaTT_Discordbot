@@ -143,6 +143,37 @@ def _load_image(source: ImageSource) -> Image.Image:
         return image.convert("RGB")
 
 
+def stitch_raw_image_sequence(images: Sequence[ImageSource], *, direction: str) -> Image.Image:
+    if len(images) < 2:
+        raise ValueError("At least two images are required.")
+    if direction not in {"horizontal", "vertical"}:
+        raise ValueError("direction must be horizontal or vertical")
+
+    loaded = []
+    for source in images:
+        if isinstance(source, Image.Image):
+            loaded.append(source.convert("RGBA"))
+        else:
+            with Image.open(source) as image:
+                loaded.append(image.convert("RGBA"))
+
+    if direction == "horizontal":
+        size = (sum(image.width for image in loaded), max(image.height for image in loaded))
+    else:
+        size = (max(image.width for image in loaded), sum(image.height for image in loaded))
+
+    stitched = Image.new("RGBA", size, (0, 0, 0, 0))
+    x = 0
+    y = 0
+    for image in loaded:
+        stitched.alpha_composite(image, (x, y))
+        if direction == "horizontal":
+            x += image.width
+        else:
+            y += image.height
+    return stitched
+
+
 def _window_means(values: np.ndarray, size: int) -> np.ndarray:
     cumulative = np.concatenate((np.zeros(1, dtype=np.float64), np.cumsum(values, dtype=np.float64)))
     return (cumulative[size:] - cumulative[:-size]) / size

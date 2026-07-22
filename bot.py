@@ -26,7 +26,7 @@ from ttbot.reporting import (
     write_records_csv,
 )
 from ttbot.storage import UserStore, get_stitch_setting, set_stitch_setting
-from ttbot.stitching import StitchingError, parse_stitch_settings, stitch_image_sequence
+from ttbot.stitching import StitchingError, parse_stitch_settings, stitch_image_sequence, stitch_raw_image_sequence
 from ttbot.team import (
     OCRAddResult,
     TeamError,
@@ -658,7 +658,7 @@ async def ocr5(
     )
 
 
-@bot.tree.command(name="stitch", description="Stitch two to ten vertically-scrolled screenshots in order.")
+@bot.tree.command(name="stitch", description="Stitch two to ten screenshots using smart vertical alignment or a raw layout.")
 @app_commands.describe(
     image_1="First screenshot (top of the scroll)",
     image_2="Second screenshot",
@@ -672,6 +672,8 @@ async def ocr5(
     image_10="Optional tenth screenshot",
     debug="Include pairwise alignment overlays",
     crop_auto="Crop the final image to the detected scrolling region",
+    raw_horizontal="Place images left to right without alignment or cropping",
+    raw_vertical="Place images top to bottom without alignment or cropping",
 )
 async def stitch(
     interaction: discord.Interaction,
@@ -687,7 +689,13 @@ async def stitch(
     image_10: Optional[discord.Attachment] = None,
     debug: bool = False,
     crop_auto: bool = False,
+    raw_horizontal: bool = False,
+    raw_vertical: bool = False,
 ) -> None:
+    if raw_horizontal and raw_vertical:
+        await respond(interaction, "raw_horizontal and raw_vertical cannot both be true.")
+        return
+
     candidates = [image_1, image_2, image_3, image_4, image_5, image_6, image_7, image_8, image_9, image_10]
     attachments = []
     found_gap = False
@@ -705,30 +713,41 @@ async def stitch(
         tmp = Path(tmp_name)
         image_paths = []
         try:
-            settings = parse_stitch_settings(get_stitch_setting(str(interaction.user.id)))
             for index, attachment in enumerate(attachments, start=1):
                 suffix = Path(attachment.filename).suffix or ".img"
                 image_path = tmp / f"input-{index:02d}{suffix}"
                 await attachment.save(image_path)
                 image_paths.append(image_path)
 
-            result = await asyncio.to_thread(
-                stitch_image_sequence,
-                image_paths,
-                crop_top=settings.crop_top,
-                crop_bottom=settings.crop_bottom,
-                window_height=settings.window_height,
-                similarity_threshold=settings.similarity_fraction,
-                crop_auto=crop_auto,
-                debug=debug,
-                debug_dir=tmp / "debug",
-            )
+            raw_direction = "horizontal" if raw_horizontal else "vertical" if raw_vertical else None
+            if raw_direction:
+                stitched_image = await asyncio.to_thread(
+                    stitch_raw_image_sequence,
+                    image_paths,
+                    direction=raw_direction,
+                )
+                debug_paths = ()
+            else:
+                settings = parse_stitch_settings(get_stitch_setting(str(interaction.user.id)))
+                result = await asyncio.to_thread(
+                    stitch_image_sequence,
+                    image_paths,
+                    crop_top=settings.crop_top,
+                    crop_bottom=settings.crop_bottom,
+                    window_height=settings.window_height,
+                    similarity_threshold=settings.similarity_fraction,
+                    crop_auto=crop_auto,
+                    debug=debug,
+                    debug_dir=tmp / "debug",
+                )
+                stitched_image = result.image
+                debug_paths = result.debug_paths
             output_path = tmp / "stitched.png"
-            await asyncio.to_thread(result.image.save, output_path, "PNG", optimize=True)
-            output_paths = [output_path, *result.debug_paths]
+            await asyncio.to_thread(stitched_image.save, output_path, "PNG", optimize=True)
+            output_paths = [output_path, *debug_paths]
             files, prepared = await prepare_generated_image_files(interaction, output_paths)
             content = (
-                f"Stitched {len(attachments)} images into {result.image.width} x {result.image.height} pixels."
+                f"Stitched {len(attachments)} images into {stitched_image.width} x {stitched_image.height} pixels."
                 + image_compression_note(prepared)
             )
             await respond_files(
