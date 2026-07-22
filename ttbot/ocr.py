@@ -67,7 +67,9 @@ class OCRService:
         work_dir: Path,
         *,
         update_coords: tuple[int | None, int | None, int | None, int | None] | None = None,
+        candidate_names: Iterable[str] | None = None,
     ) -> OCRResult:
+        candidate_names = tuple(candidate_names) if candidate_names is not None else None
         image = Image.open(image_path).convert("RGB")
         if update_coords is not None:
             current_region = self._scaled_region(user_id, screenshot_type, image.size)
@@ -86,8 +88,12 @@ class OCRService:
         crop_path = work_dir / f"{screenshot_type}-crop.png"
         crop.save(crop_path)
 
-        raw_text = self._extract_text(crop_path, screenshot_type, work_dir)
-        rows = self.parse_rows(raw_text)
+        if candidate_names is None:
+            raw_text = self._extract_text(crop_path, screenshot_type, work_dir)
+            rows = self.parse_rows(raw_text)
+        else:
+            raw_text = self._extract_text(crop_path, screenshot_type, work_dir, candidate_names)
+            rows = self.parse_rows(raw_text, candidate_names=candidate_names)
         result = OCRResult(screenshot_type=screenshot_type, rows=rows, raw_text=raw_text, region=region, highlight_path=highlight_path)
         if not rows:
             raise OCRFailure("no score rows could be parsed", result)
@@ -119,11 +125,17 @@ class OCRService:
         highlighted.save(path)
         return path
 
-    def _extract_text(self, crop_path: Path, screenshot_type: str, work_dir: Path) -> str:
+    def _extract_text(
+        self,
+        crop_path: Path,
+        screenshot_type: str,
+        work_dir: Path,
+        candidate_names: Iterable[str] | None = None,
+    ) -> str:
         provider = config.OCR_PROVIDER
         if provider in {"auto", "openai"} and config.OPENAI_MODEL and self._openai_available():
             try:
-                return self._extract_with_openai(crop_path, screenshot_type)
+                return self._extract_with_openai(crop_path, screenshot_type, candidate_names)
             except Exception as exc:
                 if provider == "openai":
                     raise OCRFailure(f"OpenAI OCR failed: {exc}") from exc
@@ -154,12 +166,17 @@ class OCRService:
             return False
         return True
 
-    def _extract_with_openai(self, crop_path: Path, screenshot_type: str) -> str:
+    def _extract_with_openai(
+        self,
+        crop_path: Path,
+        screenshot_type: str,
+        candidate_names: Iterable[str] | None = None,
+    ) -> str:
         from openai import OpenAI
 
         client = OpenAI()
         encoded = base64.b64encode(crop_path.read_bytes()).decode("ascii")
-        allowed_names = ", ".join(self.matcher.names)
+        allowed_names = ", ".join(candidate_names or self.matcher.names)
         prompt = (
             "Extract Uma Musume score rows from this cropped score list screenshot. "
             f"This is the {screenshot_type} screenshot of a two-screenshot list. "
@@ -285,13 +302,18 @@ class OCRService:
         )
         return re.sub(r"\s+", " ", line).strip()
 
-    def parse_rows(self, raw_text: str) -> list[OCRRow]:
-        json_rows = self._parse_json_rows(raw_text)
+    def parse_rows(self, raw_text: str, *, candidate_names: Iterable[str] | None = None) -> list[OCRRow]:
+        candidate_names = tuple(candidate_names) if candidate_names is not None else None
+        json_rows = self._parse_json_rows(raw_text, candidate_names)
         if json_rows:
             return json_rows
-        return self._parse_text_rows(raw_text)
+        return self._parse_text_rows(raw_text, candidate_names)
 
-    def _parse_json_rows(self, raw_text: str) -> list[OCRRow]:
+    def _parse_json_rows(
+        self,
+        raw_text: str,
+        candidate_names: Iterable[str] | None = None,
+    ) -> list[OCRRow]:
         text = raw_text.strip()
         if text.startswith("```"):
             text = re.sub(r"^```(?:json)?", "", text, flags=re.IGNORECASE).strip()
@@ -311,12 +333,16 @@ class OCRService:
                 continue
             raw_name = str(item.get("name", "")).strip()
             score = self._coerce_score(item.get("score", ""))
-            name_match = self.matcher.match(raw_name)
+            name_match = self.matcher.match(raw_name, candidates=candidate_names)
             if name_match and score:
                 rows.append(OCRRow(name=name_match.name, score=score, raw_name=raw_name))
         return rows
 
-    def _parse_text_rows(self, raw_text: str) -> list[OCRRow]:
+    def _parse_text_rows(
+        self,
+        raw_text: str,
+        candidate_names: Iterable[str] | None = None,
+    ) -> list[OCRRow]:
         rows: list[OCRRow] = []
         for raw_line in raw_text.splitlines():
             line = raw_line.strip()
@@ -329,7 +355,7 @@ class OCRService:
             if not score:
                 continue
             name_text = line[: score_match.start()]
-            name_match = self.matcher.match_in_text(name_text)
+            name_match = self.matcher.match_in_text(name_text, candidates=candidate_names)
             if not name_match:
                 continue
             rows.append(OCRRow(name=name_match.name, score=score, raw_name=name_text.strip()))

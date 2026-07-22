@@ -378,6 +378,8 @@ async def _run_ocr_trials(
     try:
         store = store_for(interaction.user)
         ensure_full_team(store)
+        team_entries = get_current_team_entries(store)
+        candidate_names = [entry.name for entry in team_entries]
         with tempfile.TemporaryDirectory(dir=config.TMP_DIR) as tmp_name:
             tmp = Path(tmp_name)
             trial_results: list[OCRAddResult | None] = []
@@ -400,6 +402,7 @@ async def _run_ocr_trials(
                                 image_path,
                                 screenshot_type,
                                 tmp,
+                                candidate_names=candidate_names,
                             )
                         )
                     except OCRFailure as exc:
@@ -420,7 +423,6 @@ async def _run_ocr_trials(
                 trial_results.append(result)
                 trial_warnings.extend(f"Trial {trial_index}: {warning}" for warning in result.warnings)
 
-            team_entries = get_current_team_entries(store)
             for table in format_ocr_trial_tables(team_entries, trial_results):
                 await respond(interaction, table)
             for warning_message in format_bullet_messages("Warnings:", trial_warnings):
@@ -805,6 +807,8 @@ async def change_ocr(
             coords = None
             if any(value is not None for value in provided):
                 coords = (top_left_x, top_left_y, bottom_right_x, bottom_right_y)
+            team_entries = get_current_team_entries(store_for(interaction.user))
+            candidate_names = [entry.name for entry in team_entries] or None
             result = await asyncio.to_thread(
                 bot.ocr_service.process_image,
                 str(interaction.user.id),
@@ -812,6 +816,7 @@ async def change_ocr(
                 screenshot_type,
                 tmp,
                 update_coords=coords,
+                candidate_names=candidate_names,
             )
             message = format_change_ocr_message(result)
         except OCRFailure as exc:
