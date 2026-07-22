@@ -65,7 +65,7 @@ Use these slash commands to modify your team:
 
 ## Screenshot Stitching
 
-`/stitch` combines two to ten same-sized screenshots of vertically scrolling content. Supply the images from top to bottom. Enable `debug` to include an alignment overlay for each successfully matched pair; alignment failures return the partial stitch and the image that failed.
+`/stitch` combines two to ten screenshots of vertically scrolling content. Supply the images from top to bottom. Enable `debug` to include an alignment overlay for each successfully matched pair; Enable `crop-auto` to auto crop the detected relevant region.
 
 `/change-stitch` shows or updates your per-user `crop_top`, `crop_bottom`, `window_height`, and `similarity_threshold` settings. Crop and window values are pixels, while similarity is a percentage from 0 to 100. Defaults are `0`, `0`, `50`, and `99` respectively.
 
