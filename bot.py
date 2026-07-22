@@ -11,6 +11,7 @@ from discord import app_commands
 
 from ttbot import config
 from ttbot.constants import ORDER_KEYS, SORT_KEYS, STRATEGIES, TRACKS
+from ttbot.image_uploads import PreparedImage, prepare_image_attachment
 from ttbot.names import NameMatcher
 from ttbot.ocr import OCRFailure, OCRService
 from ttbot.reference_data import download_missing_thumbnails, generate_reference_files
@@ -82,9 +83,30 @@ def store_for(user: discord.abc.User) -> UserStore:
 
 
 def upload_limit(interaction: discord.Interaction) -> int:
+    interaction_limit = getattr(interaction, "filesize_limit", None)
+    if interaction_limit:
+        return int(interaction_limit)
     if interaction.guild and getattr(interaction.guild, "filesize_limit", None):
         return int(interaction.guild.filesize_limit)
     return config.MAX_DISCORD_FILE_BYTES
+
+
+async def prepare_generated_image_files(
+    interaction: discord.Interaction,
+    paths: list[Path],
+) -> tuple[list[discord.File], list[PreparedImage]]:
+    limit = upload_limit(interaction)
+    prepared = [await asyncio.to_thread(prepare_image_attachment, path, limit) for path in paths]
+    files = [discord.File(item.path, filename=item.path.name) for item in prepared]
+    return files, prepared
+
+
+def image_compression_note(prepared: list[PreparedImage]) -> str:
+    count = sum(item.compressed for item in prepared)
+    if not count:
+        return ""
+    noun = "image" if count == 1 else "images"
+    return f"\nCompressed {count} generated {noun} to fit Discord's upload limit."
 
 
 async def respond(
@@ -241,10 +263,44 @@ def format_stitch_settings(settings) -> str:
 def format_change_ocr_message(result) -> str:
     x1, y1, x2, y2 = result.region
     return (
+        f"{result.region_mode.title()} parsed OCR output:\n"
         f"{bot.ocr_service.format_rows(result.rows)}\n\n"
-        f"OCR region top-left ({x1}, {y1}), bottom-right ({x2}, {y2})\n"
+        f"{result.region_mode.title()} OCR region top-left ({x1}, {y1}), bottom-right ({x2}, {y2})\n"
         f"{raw_ocr_block(result.raw_text)}"
     )
+
+
+async def prepare_change_ocr_response(
+    interaction: discord.Interaction,
+    user_id: str,
+    image_path: Path,
+    screenshot_type: str,
+    work_dir: Path,
+    *,
+    manual: bool,
+    update_coords: tuple[int | None, int | None, int | None, int | None] | None = None,
+) -> tuple[str, list[discord.File]]:
+    result = None
+    try:
+        result = await asyncio.to_thread(
+            bot.ocr_service.process_image,
+            user_id,
+            image_path,
+            screenshot_type,
+            work_dir,
+            update_coords=update_coords,
+            manual=manual,
+        )
+        message = format_change_ocr_message(result)
+    except OCRFailure as exc:
+        message = exc.to_user_message()
+        result = exc.result
+
+    preview_paths = []
+    if result and result.highlight_path and result.highlight_path.exists():
+        preview_paths.append(result.highlight_path)
+    files, prepared = await prepare_generated_image_files(interaction, preview_paths)
+    return message + image_compression_note(prepared), files
 
 
 class RecordDeleteConfirmView(discord.ui.View):
@@ -373,6 +429,8 @@ async def team_edit(
 async def _run_ocr_trials(
     interaction: discord.Interaction,
     image_pairs: list[tuple[discord.Attachment, discord.Attachment]],
+    *,
+    manual: bool = False,
 ) -> None:
     await interaction.response.defer(thinking=True)
     try:
@@ -403,6 +461,7 @@ async def _run_ocr_trials(
                                 screenshot_type,
                                 tmp,
                                 candidate_names=candidate_names,
+                                manual=manual,
                             )
                         )
                     except OCRFailure as exc:
@@ -445,6 +504,7 @@ async def _run_ocr_trials(
     bottom_image_4="Trial 4 bottom screenshot",
     top_image_5="Trial 5 top screenshot",
     bottom_image_5="Trial 5 bottom screenshot",
+    manual="Use your saved /change-ocr regions instead of automatic detection",
 )
 async def ocr(
     interaction: discord.Interaction,
@@ -458,6 +518,7 @@ async def ocr(
     bottom_image_4: Optional[discord.Attachment] = None,
     top_image_5: Optional[discord.Attachment] = None,
     bottom_image_5: Optional[discord.Attachment] = None,
+    manual: bool = False,
 ) -> None:
     candidate_pairs = [
         (top_image, bottom_image),
@@ -480,7 +541,7 @@ async def ocr(
             await respond(interaction, "Screenshot pairs must be filled consecutively without skipping a trial.")
             return
         image_pairs.append((top, bottom))
-    await _run_ocr_trials(interaction, image_pairs)
+    await _run_ocr_trials(interaction, image_pairs, manual=manual)
 
 
 @bot.tree.command(name="ocr2", description="Read exactly two top and bottom screenshot pairs and append records.")
@@ -489,6 +550,7 @@ async def ocr(
     bottom_1="Trial 1 bottom screenshot",
     top_2="Trial 2 top screenshot",
     bottom_2="Trial 2 bottom screenshot",
+    manual="Use your saved /change-ocr regions instead of automatic detection",
 )
 async def ocr2(
     interaction: discord.Interaction,
@@ -496,8 +558,9 @@ async def ocr2(
     bottom_1: discord.Attachment,
     top_2: discord.Attachment,
     bottom_2: discord.Attachment,
+    manual: bool = False,
 ) -> None:
-    await _run_ocr_trials(interaction, [(top_1, bottom_1), (top_2, bottom_2)])
+    await _run_ocr_trials(interaction, [(top_1, bottom_1), (top_2, bottom_2)], manual=manual)
 
 
 @bot.tree.command(name="ocr3", description="Read exactly three top and bottom screenshot pairs and append records.")
@@ -508,6 +571,7 @@ async def ocr2(
     bottom_2="Trial 2 bottom screenshot",
     top_3="Trial 3 top screenshot",
     bottom_3="Trial 3 bottom screenshot",
+    manual="Use your saved /change-ocr regions instead of automatic detection",
 )
 async def ocr3(
     interaction: discord.Interaction,
@@ -517,8 +581,9 @@ async def ocr3(
     bottom_2: discord.Attachment,
     top_3: discord.Attachment,
     bottom_3: discord.Attachment,
+    manual: bool = False,
 ) -> None:
-    await _run_ocr_trials(interaction, [(top_1, bottom_1), (top_2, bottom_2), (top_3, bottom_3)])
+    await _run_ocr_trials(interaction, [(top_1, bottom_1), (top_2, bottom_2), (top_3, bottom_3)], manual=manual)
 
 
 @bot.tree.command(name="ocr4", description="Read exactly four top and bottom screenshot pairs and append records.")
@@ -531,6 +596,7 @@ async def ocr3(
     bottom_3="Trial 3 bottom screenshot",
     top_4="Trial 4 top screenshot",
     bottom_4="Trial 4 bottom screenshot",
+    manual="Use your saved /change-ocr regions instead of automatic detection",
 )
 async def ocr4(
     interaction: discord.Interaction,
@@ -542,10 +608,12 @@ async def ocr4(
     bottom_3: discord.Attachment,
     top_4: discord.Attachment,
     bottom_4: discord.Attachment,
+    manual: bool = False,
 ) -> None:
     await _run_ocr_trials(
         interaction,
         [(top_1, bottom_1), (top_2, bottom_2), (top_3, bottom_3), (top_4, bottom_4)],
+        manual=manual,
     )
 
 
@@ -561,6 +629,7 @@ async def ocr4(
     bottom_4="Trial 4 bottom screenshot",
     top_5="Trial 5 top screenshot",
     bottom_5="Trial 5 bottom screenshot",
+    manual="Use your saved /change-ocr regions instead of automatic detection",
 )
 async def ocr5(
     interaction: discord.Interaction,
@@ -574,6 +643,7 @@ async def ocr5(
     bottom_4: discord.Attachment,
     top_5: discord.Attachment,
     bottom_5: discord.Attachment,
+    manual: bool = False,
 ) -> None:
     await _run_ocr_trials(
         interaction,
@@ -584,6 +654,7 @@ async def ocr5(
             (top_4, bottom_4),
             (top_5, bottom_5),
         ],
+        manual=manual,
     )
 
 
@@ -652,18 +723,15 @@ async def stitch(
             output_path = tmp / "stitched.png"
             await asyncio.to_thread(result.image.save, output_path, "PNG", optimize=True)
             output_paths = [output_path, *result.debug_paths]
-            oversized = [path for path in output_paths if path.stat().st_size > upload_limit(interaction)]
-            if output_path in oversized:
-                await respond(interaction, "The stitched image is too large for a Discord attachment.")
-                return
-            send_paths = [path for path in output_paths if path not in oversized]
-            content = f"Stitched {len(attachments)} images into {result.image.width} x {result.image.height} pixels."
-            if oversized:
-                content += f" {len(oversized)} oversized debug image(s) were omitted."
+            files, prepared = await prepare_generated_image_files(interaction, output_paths)
+            content = (
+                f"Stitched {len(attachments)} images into {result.image.width} x {result.image.height} pixels."
+                + image_compression_note(prepared)
+            )
             await respond_files(
                 interaction,
                 content,
-                files=[discord.File(path, filename=path.name) for path in send_paths],
+                files=files,
             )
         except StitchingError as exc:
             partial_path = tmp / "partial-stitch.png"
@@ -671,18 +739,9 @@ async def stitch(
             await asyncio.to_thread(exc.partial_stitch.save, partial_path, "PNG", optimize=True)
             await asyncio.to_thread(exc.failed_image.save, failed_path, "PNG", optimize=True)
             diagnostic_paths = [*exc.debug_paths[-8:], partial_path, failed_path]
-            send_paths = [path for path in diagnostic_paths if path.stat().st_size <= upload_limit(interaction)]
-            message = f"Could not stitch the screenshots: {exc}"
-            if len(send_paths) != len(diagnostic_paths):
-                message += " Some diagnostic images were too large for Discord."
-            if send_paths:
-                await respond_files(
-                    interaction,
-                    message,
-                    files=[discord.File(path, filename=path.name) for path in send_paths],
-                )
-            else:
-                await respond(interaction, message)
+            files, prepared = await prepare_generated_image_files(interaction, diagnostic_paths)
+            message = f"Could not stitch the screenshots: {exc}" + image_compression_note(prepared)
+            await respond_files(interaction, message, files=files)
         except (OSError, ValueError) as exc:
             await respond(interaction, f"Could not stitch the screenshots: {exc}")
 
@@ -803,30 +862,20 @@ async def change_ocr(
         tmp = Path(tmp_name)
         image_path = tmp / f"ocr{Path(image.filename).suffix or '.jpg'}"
         await image.save(image_path)
-        try:
-            coords = None
-            if any(value is not None for value in provided):
-                coords = (top_left_x, top_left_y, bottom_right_x, bottom_right_y)
-            team_entries = get_current_team_entries(store_for(interaction.user))
-            candidate_names = [entry.name for entry in team_entries] or None
-            result = await asyncio.to_thread(
-                bot.ocr_service.process_image,
+        updating_manual_region = any(value is not None for value in provided)
+        coords = (top_left_x, top_left_y, bottom_right_x, bottom_right_y) if updating_manual_region else None
+        modes = [(True, coords)] if updating_manual_region else [(False, None), (True, None)]
+        for manual, mode_coords in modes:
+            message, files = await prepare_change_ocr_response(
+                interaction,
                 str(interaction.user.id),
                 image_path,
                 screenshot_type,
                 tmp,
-                update_coords=coords,
-                candidate_names=candidate_names,
+                manual=manual,
+                update_coords=mode_coords,
             )
-            message = format_change_ocr_message(result)
-        except OCRFailure as exc:
-            message = exc.to_user_message()
-            result = exc.result
-
-        files = []
-        if result and result.highlight_path and result.highlight_path.exists():
-            files.append(discord.File(result.highlight_path, filename="ocr-region.png"))
-        await respond_files(interaction, message, files=files)
+            await respond_files(interaction, message, files=files)
 
 
 @bot.tree.command(name="get-records", description="Export score records as a CSV.")
@@ -920,10 +969,12 @@ async def box_and_whisker(
         with tempfile.TemporaryDirectory(dir=config.TMP_DIR) as tmp_name:
             path = Path(tmp_name) / "box-and-whisker.png"
             build_boxplot(store_for(target), path, sort, order, bot.name_matcher)
-            if path.stat().st_size > upload_limit(interaction):
-                await respond(interaction, f"Box and whisker for {target_label}\nThat plot is too large for a Discord message.")
-                return
-            await respond(interaction, f"Box and whisker for {target_label}", file=discord.File(path, filename="box-and-whisker.png"))
+            files, prepared = await prepare_generated_image_files(interaction, [path])
+            await respond(
+                interaction,
+                f"Box and whisker for {target_label}" + image_compression_note(prepared),
+                file=files[0],
+            )
     except TeamError as exc:
         await respond(interaction, f"Box and whisker for {target_label}\n{exc}")
 
@@ -964,13 +1015,11 @@ async def box_and_whisker_custom(
                 bot.name_matcher,
                 date_after,
             )
-            if path.stat().st_size > upload_limit(interaction):
-                await respond(interaction, f"Custom box and whisker for {target_label}\nThat plot is too large for a Discord message.")
-                return
+            files, prepared = await prepare_generated_image_files(interaction, [path])
             await respond(
                 interaction,
-                f"Custom box and whisker for {target_label}",
-                file=discord.File(path, filename="box-and-whisker-custom.png"),
+                f"Custom box and whisker for {target_label}" + image_compression_note(prepared),
+                file=files[0],
             )
     except TeamError as exc:
         await respond(interaction, f"Custom box and whisker for {target_label}\n{exc}")

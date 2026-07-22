@@ -27,7 +27,7 @@ OPENAI_API_KEY = os.environ.get("OPENAI_API_KEY", "").strip()
 OPENAI_MODEL = os.environ.get("OPENAI_MODEL", "gpt-4o-mini")
 EASYOCR_GPU = os.environ.get("UMA_BOT_EASYOCR_GPU", "").strip().lower() in {"1", "true", "yes", "on"}
 EASYOCR_CPU_THREADS = max(1, int(os.environ.get("UMA_BOT_EASYOCR_CPU_THREADS", "1")))
-MAX_DISCORD_FILE_BYTES = int(os.environ.get("MAX_DISCORD_FILE_BYTES", str(8 * 1024 * 1024)))
+MAX_DISCORD_FILE_BYTES = int(os.environ.get("MAX_DISCORD_FILE_BYTES", str(10 * 1024 * 1024)))
 
 
 def ensure_runtime_dirs() -> None:

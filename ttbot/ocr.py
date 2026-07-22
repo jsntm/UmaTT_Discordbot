@@ -33,6 +33,7 @@ class OCRResult:
     raw_text: str
     region: tuple[int, int, int, int]
     highlight_path: Path | None = None
+    region_mode: str = "manual"
 
 
 class OCRFailure(Exception):
@@ -49,12 +50,15 @@ class OCRFailure(Exception):
         raw = raw[:1200]
         return (
             f"{self.result.screenshot_type} screenshot OCR output was malformed: {self.message}\n"
-            f"OCR region top-left ({x1}, {y1}), bottom-right ({x2}, {y2})\n"
+            f"{self.result.region_mode.title()} OCR region top-left ({x1}, {y1}), bottom-right ({x2}, {y2})\n"
             f"Raw OCR output:\n```text\n{raw}\n```"
         )
 
 
 class OCRService:
+    PANEL_ASPECT_RATIO = 0.58
+    AUTO_MAX_CROP_PIXELS = 1_300_000
+
     def __init__(self, matcher: NameMatcher) -> None:
         self.matcher = matcher
         self._easyocr_reader = None
@@ -68,10 +72,13 @@ class OCRService:
         *,
         update_coords: tuple[int | None, int | None, int | None, int | None] | None = None,
         candidate_names: Iterable[str] | None = None,
+        manual: bool = False,
     ) -> OCRResult:
         candidate_names = tuple(candidate_names) if candidate_names is not None else None
-        image = Image.open(image_path).convert("RGB")
+        with Image.open(image_path) as source:
+            image = ImageOps.exif_transpose(source).convert("RGB")
         if update_coords is not None:
+            manual = True
             current_region = self._scaled_region(user_id, screenshot_type, image.size)
             x1, y1, x2, y2 = (
                 current if updated is None else updated
@@ -82,9 +89,28 @@ class OCRService:
             setting = {"top_left": [x1, y1], "bottom_right": [x2, y2], "base_size": [image.width, image.height]}
             set_ocr_setting(user_id, screenshot_type, setting)
 
-        region = self._scaled_region(user_id, screenshot_type, image.size)
-        highlight_path = self._write_highlight(image, region, work_dir / f"{screenshot_type}-ocr-region.png")
+        if manual:
+            region = self._scaled_region(user_id, screenshot_type, image.size)
+            region_mode = "manual"
+            highlight_color = "blue"
+        else:
+            try:
+                region = self.detect_ocr_region(image)
+            except ValueError as exc:
+                raise OCRFailure(
+                    f"automatic region detection failed: {exc}. Retry with `manual:True` or adjust `/change-ocr`."
+                ) from exc
+            region_mode = "automatic"
+            highlight_color = "red"
+        highlight_path = self._write_highlight(
+            image,
+            region,
+            work_dir / f"{screenshot_type}-{region_mode}-ocr-region.png",
+            color=highlight_color,
+        )
         crop = image.crop(region)
+        if not manual:
+            crop = self._limit_crop_size(crop)
         crop_path = work_dir / f"{screenshot_type}-crop.png"
         crop.save(crop_path)
 
@@ -94,7 +120,14 @@ class OCRService:
         else:
             raw_text = self._extract_text(crop_path, screenshot_type, work_dir, candidate_names)
             rows = self.parse_rows(raw_text, candidate_names=candidate_names)
-        result = OCRResult(screenshot_type=screenshot_type, rows=rows, raw_text=raw_text, region=region, highlight_path=highlight_path)
+        result = OCRResult(
+            screenshot_type=screenshot_type,
+            rows=rows,
+            raw_text=raw_text,
+            region=region,
+            highlight_path=highlight_path,
+            region_mode=region_mode,
+        )
         if not rows:
             raise OCRFailure("no score rows could be parsed", result)
         return result
@@ -116,12 +149,86 @@ class OCRService:
         y2 = max(y1 + 1, min(image_size[1], y2))
         return x1, y1, x2, y2
 
-    def _write_highlight(self, image: Image.Image, region: tuple[int, int, int, int], path: Path) -> Path:
+    def detect_ocr_region(self, image: Image.Image) -> tuple[int, int, int, int]:
+        import cv2
+        import numpy as np
+
+        pixels = np.asarray(image.convert("RGB"))
+        image_height, image_width = pixels.shape[:2]
+        hsv = cv2.cvtColor(pixels, cv2.COLOR_RGB2HSV)
+        green = cv2.inRange(
+            hsv,
+            np.array([35, 100, 80], dtype=np.uint8),
+            np.array([95, 255, 255], dtype=np.uint8),
+        )
+        kernel = cv2.getStructuringElement(
+            cv2.MORPH_RECT,
+            (max(3, image_width // 100), max(3, image_height // 300)),
+        )
+        green = cv2.morphologyEx(green, cv2.MORPH_CLOSE, kernel)
+        contours, _ = cv2.findContours(green, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+
+        minimum_width = max(120, round(min(image_width, image_height) * 0.25))
+        candidates = []
+        for contour in contours:
+            x, y, width, height = cv2.boundingRect(contour)
+            height_ratio = height / max(1, width)
+            if width < minimum_width or not 0.065 <= height_ratio <= 0.13:
+                continue
+            coverage = float(np.count_nonzero(green[y : y + height, x : x + width])) / (width * height)
+            if coverage < 0.55:
+                continue
+            candidates.append((coverage * width * height, x, y, width, height))
+
+        if not candidates:
+            raise ValueError("the green Score Info header was not found")
+        _, header_x, header_y, header_width, header_height = max(candidates)
+        panel_height = round(header_width / self.PANEL_ASPECT_RATIO)
+        left = max(0, header_x + round(header_width * 0.16))
+        top = max(0, header_y + header_height)
+        right = min(image_width, header_x + header_width - round(header_width * 0.03))
+        bottom = min(image_height, header_y + panel_height)
+        if right - left < 100 or bottom - top < 100:
+            raise ValueError("the detected Score Info panel is too small")
+        return left, top, right, bottom
+
+    def write_manual_highlight(
+        self,
+        user_id: str,
+        image_path: Path,
+        screenshot_type: ScreenshotType,
+        output_path: Path,
+    ) -> tuple[Path, tuple[int, int, int, int]]:
+        with Image.open(image_path) as source:
+            image = ImageOps.exif_transpose(source).convert("RGB")
+        region = self._scaled_region(user_id, screenshot_type, image.size)
+        return self._write_highlight(image, region, output_path, color="blue"), region
+
+    def _limit_crop_size(self, crop: Image.Image) -> Image.Image:
+        if crop.width * crop.height <= self.AUTO_MAX_CROP_PIXELS:
+            return crop
+        scale = (self.AUTO_MAX_CROP_PIXELS / (crop.width * crop.height)) ** 0.5
+        size = max(1, round(crop.width * scale)), max(1, round(crop.height * scale))
+        return crop.resize(size, Image.Resampling.LANCZOS)
+
+    def _write_highlight(
+        self,
+        image: Image.Image,
+        region: tuple[int, int, int, int],
+        path: Path,
+        *,
+        color: str = "blue",
+    ) -> Path:
         overlay = image.convert("RGBA")
-        blue = Image.new("RGBA", overlay.size, (0, 0, 0, 0))
-        draw = ImageDraw.Draw(blue)
-        draw.rectangle(region, fill=(50, 130, 255, 48), outline=(30, 105, 255, 255), width=8)
-        highlighted = Image.alpha_composite(overlay, blue).convert("RGB")
+        highlight = Image.new("RGBA", overlay.size, (0, 0, 0, 0))
+        draw = ImageDraw.Draw(highlight)
+        if color == "red":
+            fill, outline = (255, 45, 45, 45), (220, 25, 25, 255)
+        else:
+            fill, outline = (50, 130, 255, 48), (30, 105, 255, 255)
+        line_width = max(3, round(min(image.size) * 0.006))
+        draw.rectangle(region, fill=fill, outline=outline, width=line_width)
+        highlighted = Image.alpha_composite(overlay, highlight).convert("RGB")
         highlighted.save(path)
         return path
 
