@@ -25,6 +25,40 @@ def _rgb_image(image: Image.Image) -> Image.Image:
     return image.convert("RGB")
 
 
+def _has_alpha(image: Image.Image) -> bool:
+    return image.mode in {"RGBA", "LA"} or "transparency" in image.info
+
+
+def _png_bytes(image: Image.Image) -> bytes:
+    output = BytesIO()
+    image.save(output, "PNG", optimize=True, compress_level=9)
+    return output.getvalue()
+
+
+def _best_scaled_png(image: Image.Image, target_size: int) -> tuple[bytes, tuple[int, int]] | None:
+    low, high = 0.0, 1.0
+    best = None
+    tested_sizes: set[tuple[int, int]] = set()
+    for _ in range(12):
+        scale = (low + high) / 2.0
+        size = max(1, round(image.width * scale)), max(1, round(image.height * scale))
+        if size in tested_sizes:
+            break
+        tested_sizes.add(size)
+        resized = image.resize(size, Image.Resampling.LANCZOS)
+        payload = _png_bytes(resized)
+        if len(payload) <= target_size:
+            best = payload, size
+            low = scale
+        else:
+            high = scale
+    if best is not None:
+        return best
+    smallest = image.resize((1, 1), Image.Resampling.LANCZOS)
+    payload = _png_bytes(smallest)
+    return (payload, (1, 1)) if len(payload) <= target_size else None
+
+
 def _jpeg_bytes(image: Image.Image, quality: int) -> bytes:
     output = BytesIO()
     image.save(output, "JPEG", quality=quality, optimize=True, progressive=True, subsampling=2)
@@ -67,6 +101,21 @@ def prepare_image_attachment(path: Path, max_bytes: int) -> PreparedImage:
             optimized_size,
             original_dimensions,
             original_dimensions,
+        )
+
+    if _has_alpha(image):
+        fitted = _best_scaled_png(image, target_size)
+        if fitted is None:
+            raise ValueError(f"could not compress {path.name} below {max_bytes} bytes")
+        payload, final_dimensions = fitted
+        optimized_png.write_bytes(payload)
+        return PreparedImage(
+            optimized_png,
+            True,
+            original_size,
+            len(payload),
+            original_dimensions,
+            final_dimensions,
         )
 
     working = _rgb_image(image)

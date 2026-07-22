@@ -671,6 +671,7 @@ async def ocr5(
     image_9="Optional ninth screenshot",
     image_10="Optional tenth screenshot",
     debug="Include pairwise alignment overlays",
+    crop_auto="Crop the final image to the detected scrolling region",
 )
 async def stitch(
     interaction: discord.Interaction,
@@ -685,6 +686,7 @@ async def stitch(
     image_9: Optional[discord.Attachment] = None,
     image_10: Optional[discord.Attachment] = None,
     debug: bool = False,
+    crop_auto: bool = False,
 ) -> None:
     candidates = [image_1, image_2, image_3, image_4, image_5, image_6, image_7, image_8, image_9, image_10]
     attachments = []
@@ -717,6 +719,7 @@ async def stitch(
                 crop_bottom=settings.crop_bottom,
                 window_height=settings.window_height,
                 similarity_threshold=settings.similarity_fraction,
+                crop_auto=crop_auto,
                 debug=debug,
                 debug_dir=tmp / "debug",
             )
