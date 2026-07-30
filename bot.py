@@ -248,6 +248,20 @@ def format_bullet_messages(header: str, messages: list[str], *, max_chars: int =
     return chunks
 
 
+def format_ocr_score_warnings(records) -> list[str]:
+    messages = [
+        (
+            f"index `{record.index}`: {record.entry.name} ({record.entry.outfit}) "
+            f"scored `{record.score:,}`"
+        )
+        for record in records
+    ]
+    return format_bullet_messages(
+        "Possible OCR score issues (records were still added; verify with `/record-edit`):",
+        messages,
+    )
+
+
 def format_stitch_settings(settings) -> str:
     threshold = f"{settings.similarity_threshold:g}%"
     rows = [
@@ -443,6 +457,7 @@ async def _run_ocr_trials(
             trial_results: list[OCRAddResult | None] = []
             trial_warnings: list[str] = []
             failure_details: list[str] = []
+            score_outliers = []
             for trial_index, (top, bottom) in enumerate(image_pairs, start=1):
                 top_path = tmp / f"trial-{trial_index}-top{Path(top.filename).suffix or '.jpg'}"
                 bottom_path = tmp / f"trial-{trial_index}-bottom{Path(bottom.filename).suffix or '.jpg'}"
@@ -481,6 +496,7 @@ async def _run_ocr_trials(
                 result = add_records_from_ocr(store, rows, interaction.created_at)
                 trial_results.append(result)
                 trial_warnings.extend(f"Trial {trial_index}: {warning}" for warning in result.warnings)
+                score_outliers.extend(result.score_outliers)
 
             for table in format_ocr_trial_tables(team_entries, trial_results):
                 await respond(interaction, table)
@@ -488,6 +504,8 @@ async def _run_ocr_trials(
                 await respond(interaction, warning_message)
             for failure_detail in failure_details:
                 await respond(interaction, failure_detail)
+            for warning_message in format_ocr_score_warnings(score_outliers):
+                await respond(interaction, warning_message)
     except TeamError as exc:
         await respond(interaction, str(exc))
 

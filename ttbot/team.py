@@ -1,7 +1,8 @@
 from __future__ import annotations
 
+import statistics
 from collections import Counter
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime, timezone
 
 from ttbot.constants import POSITION_LABELS, POSITIONS, TRACKS
@@ -50,6 +51,7 @@ class AddedRecord:
 class OCRAddResult:
     added: list[AddedRecord]
     warnings: list[str]
+    score_outliers: list[AddedRecord] = field(default_factory=list)
 
 
 def format_uma_id(uma_id: str) -> str:
@@ -114,7 +116,15 @@ def _validate_name(matcher: NameMatcher, raw_name: str) -> str:
 def _validate_outfit(matcher: NameMatcher, official_name: str, raw_outfit: str) -> str:
     match = matcher.match_outfit(official_name, raw_outfit)
     if not match:
-        raise TeamError(f"outfit `{raw_outfit}` did not match a known outfit for {official_name} closely enough.")
+        gametora_id = matcher.gametora_id(official_name)
+        outfits = matcher.outfits_by_id.get(gametora_id, []) if gametora_id else []
+        choices = ""
+        if outfits:
+            choices = f" Possible outfits for {official_name}: " + ", ".join(f"`{outfit}`" for outfit in outfits) + "."
+        raise TeamError(
+            f"outfit `{raw_outfit}` did not match a known outfit for {official_name} closely enough."
+            f"{choices}"
+        )
     return match.outfit
 
 
@@ -428,6 +438,27 @@ def ocr_bijection_issues(store: UserStore, rows: list[OCRRow]) -> list[str]:
     return issues
 
 
+def _find_ocr_score_outliers(added: list[AddedRecord]) -> list[AddedRecord]:
+    if len(added) < 8:
+        return []
+    # A clear digit-length consensus and a multi-fold gap target OCR digit errors without policing variance.
+    digit_counts = Counter(len(str(record.score)) for record in added)
+    typical_digits, typical_count = digit_counts.most_common(1)[0]
+    if typical_count < len(added) * 0.75:
+        return []
+
+    median_score = float(statistics.median(record.score for record in added))
+    return [
+        record
+        for record in added
+        if len(str(record.score)) != typical_digits
+        and (
+            record.score >= median_score * 2.5
+            or record.score * 4 <= median_score
+        )
+    ]
+
+
 def add_records_from_ocr(store: UserStore, rows: list[OCRRow], timestamp: datetime) -> OCRAddResult:
     if not rows:
         raise TeamError("OCR did not return any score rows.")
@@ -471,5 +502,6 @@ def add_records_from_ocr(store: UserStore, rows: list[OCRRow], timestamp: dateti
         warnings.append("Missing from OCR: " + ", ".join(name_map[name].name for name in missing))
     if not records:
         raise TeamError("OCR did not produce any records that match your current team.")
+    score_outliers = _find_ocr_score_outliers(added)
     store.append_records(records)
-    return OCRAddResult(added, warnings)
+    return OCRAddResult(added, warnings, score_outliers)

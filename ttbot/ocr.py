@@ -61,6 +61,10 @@ class OCRFailure(Exception):
 class OCRService:
     PANEL_ASPECT_RATIO = 0.58
     AUTO_MAX_CROP_PIXELS = 1_300_000
+    # Stable score-panel geometry lets the Close button reproduce the header-derived crop.
+    CLOSE_BUTTON_WIDTH_RATIO = 0.4026
+    CLOSE_PANEL_BOTTOM_GAP_RATIO = 0.0378
+    CLOSE_PANEL_HEADER_HEIGHT_RATIO = 0.0877
 
     def __init__(self, matcher: NameMatcher) -> None:
         self.matcher = matcher
@@ -183,16 +187,104 @@ class OCRService:
                 continue
             candidates.append((coverage * width * height, x, y, width, height))
 
-        if not candidates:
-            raise ValueError("the green Score Info header was not found")
-        _, header_x, header_y, header_width, header_height = max(candidates)
-        panel_height = round(header_width / self.PANEL_ASPECT_RATIO)
-        left = max(0, header_x + round(header_width * 0.20))
-        top = max(0, header_y + header_height)
-        right = min(image_width, header_x + header_width - round(header_width * 0.03))
-        bottom = min(image_height, header_y + panel_height)
+        for _, header_x, header_y, header_width, header_height in sorted(candidates, reverse=True):
+            panel_height = round(header_width / self.PANEL_ASPECT_RATIO)
+            if header_y + panel_height > image_height:
+                continue
+            left = max(0, header_x + round(header_width * 0.20))
+            top = max(0, header_y + header_height)
+            right = min(image_width, header_x + header_width - round(header_width * 0.03))
+            bottom = header_y + panel_height
+            if right - left >= 100 and bottom - top >= 100:
+                return left, top, right, bottom
+
+        return self._detect_close_button_region(pixels)
+
+    def _detect_close_button_region(self, pixels) -> tuple[int, int, int, int]:
+        import cv2
+
+        image_height, image_width = pixels.shape[:2]
+        minimum_dimension = min(image_width, image_height)
+        gray = cv2.cvtColor(pixels, cv2.COLOR_RGB2GRAY)
+        edges = cv2.Canny(gray, 40, 120)
+        contours, _ = cv2.findContours(edges, cv2.RETR_LIST, cv2.CHAIN_APPROX_SIMPLE)
+
+        button_candidates = []
+        for contour in contours:
+            x, y, width, height = cv2.boundingRect(contour)
+            aspect_ratio = width / max(1, height)
+            rectangularity = cv2.contourArea(contour) / max(1, width * height)
+            if (
+                y > image_height * 0.55
+                and width > minimum_dimension * 0.12
+                and minimum_dimension * 0.025 < height < minimum_dimension * 0.15
+                and 3.2 < aspect_ratio < 4.2
+                and rectangularity > 0.90
+            ):
+                button_candidates.append((width * height, x, y, width, height))
+        if not button_candidates:
+            raise ValueError("the green Score Info header and Close button were not found")
+
+        _, button_x, button_y, button_width, button_height = max(button_candidates)
+        button_center = button_x + button_width / 2
+        expected_panel_width = button_width / self.CLOSE_BUTTON_WIDTH_RATIO
+        panel_candidates = []
+        for contour in contours:
+            x, y, width, height = cv2.boundingRect(contour)
+            if (
+                2.2 * button_width < width < 2.8 * button_width
+                and x < button_center < x + width
+                and y < button_y - 3 * button_height
+                and y + height >= button_y + button_height
+                and height > width
+            ):
+                rectangularity = cv2.contourArea(contour) / max(1, width * height)
+                panel_candidates.append(
+                    (
+                        abs(width - expected_panel_width),
+                        -height,
+                        x,
+                        y,
+                        width,
+                        height,
+                        rectangularity,
+                    )
+                )
+
+        geometric_bottom = round(
+            button_y
+            + button_height
+            + expected_panel_width * self.CLOSE_PANEL_BOTTOM_GAP_RATIO
+        )
+        geometric_top = (
+            geometric_bottom
+            - round(expected_panel_width / self.PANEL_ASPECT_RATIO)
+            + round(expected_panel_width * self.CLOSE_PANEL_HEADER_HEIGHT_RATIO)
+        )
+        if panel_candidates:
+            _, _, panel_x, panel_y, panel_width, panel_height, rectangularity = min(panel_candidates)
+            panel_top = panel_y + max(1, round(panel_width * 0.0015))
+            top = (
+                panel_top
+                if rectangularity >= 0.99 or abs(panel_top - geometric_top) <= 5
+                else geometric_top
+            )
+            left = panel_x + round(panel_width * 0.1995)
+            right = panel_x + panel_width - round(panel_width * 0.029)
+            bottom = panel_y + panel_height - max(2, round(panel_width * 0.006))
+        else:
+            panel_x = round(button_center - expected_panel_width / 2)
+            left = panel_x + round(expected_panel_width * 0.20)
+            right = panel_x + round(expected_panel_width * 0.97)
+            top = geometric_top
+            bottom = geometric_bottom
+
+        left = max(0, left)
+        top = max(0, top)
+        right = min(image_width, right)
+        bottom = min(image_height, bottom)
         if right - left < 100 or bottom - top < 100:
-            raise ValueError("the detected Score Info panel is too small")
+            raise ValueError("the Close button was found, but the detected Score Info panel is too small")
         return left, top, right, bottom
 
     def write_manual_highlight(
