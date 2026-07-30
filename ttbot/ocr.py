@@ -17,6 +17,9 @@ from ttbot.storage import get_ocr_setting, set_ocr_setting
 
 
 ScreenshotType = Literal["top", "bottom"]
+SCORE_TOKEN_RE = re.compile(
+    r"(?<![A-Za-z0-9])(?:[,.]\s*\d{3}|\d{1,3}(?:(?:[,.]\s*|\s+)\d{3})+|\d{3,})(?![A-Za-z0-9])"
+)
 
 
 @dataclass(frozen=True)
@@ -184,7 +187,7 @@ class OCRService:
             raise ValueError("the green Score Info header was not found")
         _, header_x, header_y, header_width, header_height = max(candidates)
         panel_height = round(header_width / self.PANEL_ASPECT_RATIO)
-        left = max(0, header_x + round(header_width * 0.16))
+        left = max(0, header_x + round(header_width * 0.20))
         top = max(0, header_y + header_height)
         right = min(image_width, header_x + header_width - round(header_width * 0.03))
         bottom = min(image_height, header_y + panel_height)
@@ -455,10 +458,10 @@ class OCRService:
             line = raw_line.strip()
             if not line or self._is_noise_line(line):
                 continue
-            score_match = re.search(r"(\d[\d,\s.]{2,})\s*(?:pts?|p)?", line, flags=re.IGNORECASE)
+            score_match = self._find_score_match(line)
             if not score_match:
                 continue
-            score = self._coerce_score(score_match.group(1))
+            score = self._coerce_score(score_match.group(0))
             if not score:
                 continue
             name_text = line[: score_match.start()]
@@ -468,13 +471,19 @@ class OCRService:
             rows.append(OCRRow(name=name_match.name, score=score, raw_name=name_text.strip()))
         return rows
 
+    def _find_score_match(self, line: str) -> re.Match[str] | None:
+        point_markers = list(re.finditer(r"\b(?:pts?|p)\b", line, flags=re.IGNORECASE))
+        score_text = line[: point_markers[-1].start()] if point_markers else line
+        matches = list(SCORE_TOKEN_RE.finditer(score_text))
+        return matches[-1] if matches else None
+
     def _is_noise_line(self, line: str) -> bool:
         normalized = line.lower()
         return any(piece in normalized for piece in ["score info", "leading the charge", "close", "rank"])
 
     def _coerce_score(self, value: object) -> int | None:
         digits = re.sub(r"\D", "", str(value))
-        if len(digits) < 4:
+        if len(digits) < 3:
             return None
         try:
             score = int(digits)
