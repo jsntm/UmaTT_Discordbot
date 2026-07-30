@@ -386,12 +386,19 @@ def _translation_candidates(
     good_matches = [pair[0] for pair in pairs if len(pair) == 2 and pair[0].distance < 0.72 * pair[1].distance]
     if len(good_matches) < 4:
         raise AlignmentError(f"Not enough unambiguous feature matches were found ({len(good_matches)}).")
+    reverse_pairs = matcher.knnMatch(next_features.descriptors, previous_features.descriptors, k=2)
+    reverse_matches = {
+        (pair[0].trainIdx, pair[0].queryIdx)
+        for pair in reverse_pairs
+        if len(pair) == 2 and pair[0].distance < 0.72 * pair[1].distance
+    }
 
     scale = previous_features.scale
     greatest_shift = previous.height - min(window_height, previous.height - 1)
     allowed_shift = greatest_shift if max_shift is None else min(max_shift, greatest_shift)
     previous_points = []
     next_points = []
+    reciprocal_matches = []
     for match in good_matches:
         previous_point = np.asarray(previous_features.keypoints[match.queryIdx].pt, dtype=np.float32)
         next_point = np.asarray(next_features.keypoints[match.trainIdx].pt, dtype=np.float32)
@@ -399,11 +406,13 @@ def _translation_candidates(
         if min_shift <= y_shift <= allowed_shift:
             previous_points.append(previous_point)
             next_points.append(next_point)
+            reciprocal_matches.append((match.queryIdx, match.trainIdx) in reverse_matches)
     if len(previous_points) < 4:
         raise AlignmentError("No feature cluster represented downward scrolling motion.")
 
     previous_array = np.asarray(previous_points, dtype=np.float32)
     next_array = np.asarray(next_points, dtype=np.float32)
+    reciprocal_array = np.asarray(reciprocal_matches, dtype=bool)
     offsets = previous_array - next_array
     remaining = np.arange(len(previous_array))
     previous_pixels = np.asarray(previous.convert("RGB"))
@@ -456,6 +465,7 @@ def _translation_candidates(
                         y_shift,
                         verification_bounds,
                     )
+                    reciprocal_inliers = int(reciprocal_array[inlier_indices].sum())
                     content_margin = max(96.0, span_x * 0.5)
                     candidates.append(
                         _TranslationCandidate(
@@ -463,7 +473,7 @@ def _translation_candidates(
                             y_shift=y_shift,
                             inlier_count=int(inlier_indices.size),
                             match_fraction=match_fraction,
-                            rank=float(inlier_indices.size) * match_fraction**2,
+                            rank=float(max(1, reciprocal_inliers)) * match_fraction**2,
                             verification_bounds=verification_bounds,
                             content_left=int(np.floor(points[:, 0].min() - content_margin)),
                             content_right=int(np.ceil(points[:, 0].max() + content_margin)),
@@ -501,8 +511,8 @@ def _comparison_match(
 ) -> Match:
     left = max(0, candidate.x_shift, candidate.verification_bounds[0])
     right = min(previous.width, candidate.x_shift + next_image.width, candidate.verification_bounds[2])
-    top = max(0, candidate.y_shift)
-    bottom = min(previous.height, candidate.y_shift + next_image.height)
+    top = max(0, candidate.y_shift, candidate.verification_bounds[1])
+    bottom = min(previous.height, candidate.y_shift + next_image.height, candidate.verification_bounds[3])
     if right - left < 32 or bottom - top < window_height:
         raise AlignmentError("The translated screenshots do not have a large enough informative overlap.")
 
