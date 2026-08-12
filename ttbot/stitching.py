@@ -497,7 +497,12 @@ def _translation_candidates(
         if candidate.y_shift + next_image.height > previous.height
     ]
     ranked = advancing_candidates or ranked
-    return sorted(ranked, key=lambda candidate: candidate.rank, reverse=True)
+    ranked = sorted(ranked, key=lambda candidate: candidate.rank, reverse=True)
+    if previous.width == next_image.width:
+        # Repeated columns can create a stronger false mode; keep it as a fallback after centered modes.
+        horizontal_tolerance = max(4, round(previous.width * 0.01))
+        ranked.sort(key=lambda candidate: abs(candidate.x_shift) > horizontal_tolerance)
+    return ranked
 
 
 def _comparison_match(
@@ -509,10 +514,16 @@ def _comparison_match(
     similarity_threshold: float,
     min_activity: float,
 ) -> Match:
+    # Verification bounds describe feature centers, so the comparison window may extend around them.
+    half_window = window_height // 2
     left = max(0, candidate.x_shift, candidate.verification_bounds[0])
     right = min(previous.width, candidate.x_shift + next_image.width, candidate.verification_bounds[2])
-    top = max(0, candidate.y_shift, candidate.verification_bounds[1])
-    bottom = min(previous.height, candidate.y_shift + next_image.height, candidate.verification_bounds[3])
+    top = max(0, candidate.y_shift, candidate.verification_bounds[1] - half_window)
+    bottom = min(
+        previous.height,
+        candidate.y_shift + next_image.height,
+        candidate.verification_bounds[3] + half_window,
+    )
     if right - left < 32 or bottom - top < window_height:
         raise AlignmentError("The translated screenshots do not have a large enough informative overlap.")
 

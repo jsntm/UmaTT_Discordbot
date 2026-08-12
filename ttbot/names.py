@@ -57,6 +57,10 @@ class NameMatcher:
         self.by_normalized = {normalize_name(name): name for name in self.names}
         self.aliases = self._validated_aliases(aliases or {}, self.by_normalized, "uma name")
         self.variants_by_name = {name: {normalize_name(name)} for name in self.names}
+        for name, variants in self.variants_by_name.items():
+            normalized = normalize_name(name)
+            if normalized.endswith(" o"):
+                variants.add(normalized[:-2])
         for alias, official in self.aliases.items():
             self.variants_by_name[official].add(alias)
         self.outfits_by_id = {str(key): [str(value) for value in values] for key, values in (outfits_by_id or {}).items()}

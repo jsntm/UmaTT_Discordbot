@@ -175,7 +175,7 @@ class OCRService:
         green = cv2.morphologyEx(green, cv2.MORPH_CLOSE, kernel)
         contours, _ = cv2.findContours(green, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
 
-        minimum_width = max(120, round(min(image_width, image_height) * 0.25))
+        minimum_width = max(120, round(min(image_width, image_height) * 0.50))
         candidates = []
         for contour in contours:
             x, y, width, height = cv2.boundingRect(contour)
